@@ -28,8 +28,9 @@ or two saved JSON files, and counts the rows with a group-by statistics query.
     python rendergap.py --layer-json layer.lyrx --static
     python rendergap.py --url ... --out findings.csv --apply
 
-Nothing is written without --apply, and the only file it writes is --out.
-The tool sends GET requests and never changes a service.
+Nothing is written without --apply, and the only file it writes is --out, which
+must not exist yet. (--self-test also writes in a temporary directory that it
+removes.) The tool sends GET requests and never changes a service.
 
 Exit codes: 0 compared and nothing flagged, 1 at least one feature loss was
 flagged, 2 a source could not be read or the output could not be written,
@@ -199,8 +200,10 @@ def from_rest(r):
         raise Unsupported("the renderer names no field, so its classes come "
                           "from an expression this tool cannot query")
     infos = r.get("uniqueValueInfos")
-    if not isinstance(infos, list):
-        raise Unsupported("the renderer has no uniqueValueInfos list "
+    if not isinstance(infos, list) or not infos:
+        # An empty list beside a full uniqueValueGroups looks like a renderer
+        # with no classes, and a default symbol would then call every value drawn.
+        raise Unsupported("the renderer has no uniqueValueInfos entries "
                           "(uniqueValueGroups is not read)")
     classes = []
     for index, info in enumerate(infos):
@@ -305,6 +308,12 @@ def _count(value):
                              and not value.is_integer()):
         raise SourceError("a count in the statistics response is %r, not a "
                           "whole number" % (value,))
+    if value == 0:
+        # A group that exists holds a row, so a zero is a COUNT that skipped
+        # the nulls. Believing it would report the null class as empty.
+        raise SourceError("a group in the statistics response has a count of "
+                          "0. The count was taken on a field that holds nulls. "
+                          "Count the object id field instead.")
     return int(value)
 
 
@@ -428,9 +437,15 @@ def describe(report, sample=DEFAULT_SAMPLE, fail_on_lint=False):
         out.append("VERDICT: no renderer defect found. This was a static "
                    "check: the data was not queried.")
     else:
-        out.append("VERDICT: clean. Every value combination has a class or a "
-                   "default symbol, and no class carries the %s token."
-                   % NULL_TOKEN)
+        latent = sum(1 for f in report.findings if f.kind == NULL_CLASS)
+        if latent:
+            out.append("VERDICT: clean now, with %d latent null-token "
+                       "class(es). No feature is in one today. The first row "
+                       "that arrives will fail the run." % latent)
+        else:
+            out.append("VERDICT: clean. Every value combination has a class "
+                       "or a default symbol, and no class carries the %s "
+                       "token." % NULL_TOKEN)
     return out
 
 
@@ -464,9 +479,11 @@ def check_error(doc, token=None):
     error = doc.get("error")
     if error is not None:
         detail = error if isinstance(error, dict) else {"message": error}
+        # Redact before the cut. A token that straddles character 200 would
+        # otherwise survive as an unmatched prefix.
+        message = _redact(str(detail.get("message")), token)[:200]
         raise SourceError(_redact("the service returned an error: code %s, %s"
-                                  % (detail.get("code"),
-                                     str(detail.get("message"))[:200]), token))
+                                  % (detail.get("code"), message), token))
 
 
 def get_json(url, params, token=None):
@@ -509,12 +526,19 @@ def read_json(path):
 
 
 def write_findings(path, report):
-    with open(path, "w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(OUT_COLUMNS)
-        for f in report.findings:
-            writer.writerow([f.kind, f.severity, f.key,
-                             "" if f.rows is None else f.rows, f.text])
+    """Create path, which must not exist. A failed write removes the partial
+    file, so a re-run is not refused for a file the tool left behind."""
+    handle = open(path, "x", newline="", encoding="utf-8")
+    try:
+        with handle:
+            writer = csv.writer(handle)
+            writer.writerow(OUT_COLUMNS)
+            for f in report.findings:
+                writer.writerow([f.kind, f.severity, f.key,
+                                 "" if f.rows is None else f.rows, f.text])
+    except (OSError, csv.Error, UnicodeError):
+        os.remove(path)
+        raise
 
 
 # ----------------------------------------------------------------- self-test
@@ -661,8 +685,23 @@ def _self_test(tmp):
           all(f.severity != FAIL for f in quiet.findings),
           "null-token classes with no rows are latent, so the run passes")
 
+    check("VERDICT: clean now, with 2 latent null-token class(es)" in
+          describe(quiet)[-1] and "VERDICT: clean." not in
+          "\n".join(describe(quiet)),
+          "the verdict names the latent null-token classes and does not say "
+          "the layer carries none  <-- pinned defect")
+
     # ---- the missing default symbol
     bare = from_rest(rest(["A,x"], default=False))
+    report = analyze(from_rest(rest(["A,x "], default=False)), {"A,x": 3})
+    check(kinds(report) == [HIDDEN],
+          "a trailing space in a class value is part of the value")
+    report = analyze(from_rest(rest(["a,x"], default=False)), {"A,x": 2})
+    check(kinds(report) == [HIDDEN], "the comparison is case sensitive")
+    report = analyze(bare, {"B,y": 2, "A,z": 2})
+    check([f.key for f in report.findings if f.kind == HIDDEN] ==
+          ["A,z", "B,y"],
+          "groups of equal size list in key order")
     report = analyze(bare, {"A,x": 3, "B,y": 7, "C,": 2})
     hidden = [f for f in report.findings if f.kind == HIDDEN]
     check([f.key for f in hidden] == ["B,y", "C,"] and gate(report) == 1,
@@ -722,6 +761,11 @@ def _self_test(tmp):
     del bad["uniqueValueInfos"]
     raises(Unsupported, lambda: from_rest(bad),
            "a renderer with no uniqueValueInfos is unsupported")
+    bad["uniqueValueInfos"] = []
+    bad["uniqueValueGroups"] = [{"classes": [{"value": "A,<Null>"}]}]
+    raises(Unsupported, lambda: from_rest(bad),
+           "an empty uniqueValueInfos beside full uniqueValueGroups is "
+           "unsupported, not a renderer with no classes  <-- pinned defect")
     bad = rest(["a"])
     bad["uniqueValueInfos"].append({"label": "no value"})
     raises(Unsupported, lambda: from_rest(bad),
@@ -839,7 +883,17 @@ def _self_test(tmp):
         "a row missing a renderer field is refused")
     raises(SourceError, lambda: parse_stats({"features": [5]}, renderer),
            "a row that is not an object is refused")
-    for bad_count in (-1, 1.5, "7", True, None):
+    named = ""
+    try:
+        parse_stats(stats([{"KIND": "A", "SUBKIND": "x"}]), renderer)
+    except SourceError as exc:
+        named = str(exc)
+    check(COUNT_FIELD in named,
+          "a row with no count column is refused and names the column  "
+          "<-- pinned defect")
+    raises(SourceError, lambda: check_error({"error": {}}),
+           "an empty error object is still an error  <-- pinned defect")
+    for bad_count in (0, -1, 1.5, "7", True, None):
         raises(SourceError, lambda b=bad_count: parse_stats(stats([
             {"KIND": "A", "SUBKIND": "x", COUNT_FIELD: b}]), renderer),
             "a count of %r is refused" % (bad_count,))
@@ -857,6 +911,9 @@ def _self_test(tmp):
     check(any("... 1 more not listed" in l for l in
               describe(analyze(bare, crowd), sample=1)),
           "a sample of 1 lists one and counts the rest")
+    check(len([l for l in describe(analyze(bare, crowd), sample=1)
+               if l.startswith("  '")]) == 1,
+          "a sample of 1 lists exactly one line  <-- pinned defect")
     check(not any("more not listed" in l for l in
                   describe(analyze(bare, crowd), sample=2)),
           "a section no longer than the sample hides nothing")
@@ -893,10 +950,24 @@ def _self_test(tmp):
     check(rows[0] == list(OUT_COLUMNS) and rows[1][0] == NULL_CLASS and
           rows[1][3] == "40",
           "the findings file has its header and a row per finding")
+    kept = open(out_path, encoding="utf-8").read()
+    raises(FileExistsError, lambda: write_findings(out_path, report),
+           "the writer refuses a file that already exists  <-- pinned defect")
+    check(open(out_path, encoding="utf-8").read() == kept,
+          "the refused file is left as it was")
+    out_path = os.path.join(tmp, "findings-static.csv")
     write_findings(out_path, analyze(bare, None, static=True))
     with open(out_path, newline="", encoding="utf-8") as handle:
         check(list(csv.reader(handle))[1][3] == "",
               "a finding with no row count writes an empty cell")
+    torn = analyze(bare, None, static=True)
+    torn.findings[0].text = "lone surrogate \ud800"
+    torn_path = os.path.join(tmp, "torn.csv")
+    raises(UnicodeEncodeError, lambda: write_findings(torn_path, torn),
+           "text that cannot be encoded fails the write")
+    check(not os.path.exists(torn_path),
+          "a write that fails part-way leaves no partial file  "
+          "<-- pinned defect")
 
     # ---- the url check
     check(url_problem("https://host/rest/services/S/MapServer/0") is None,
@@ -973,6 +1044,7 @@ def _self_test(tmp):
         server.shutdown()
         server.server_close()
 
+    real_analyze_wire = analyze
     stub = start()
     other = start()
     base = "http://127.0.0.1:%d/svc/MapServer/0" % stub.server_address[1]
@@ -1007,11 +1079,14 @@ def _self_test(tmp):
         # the same layer if the count had been on a nullable field
         stub.cfg["layer"] = layer(sfha, oid="SUBKIND")
         code, out, err = run_cli(["--url", base])
-        check(code == 0 and "features: 60 in 3" in out and
-              "no feature is in it now" in out,
+        check(code == 2 and "count of 0" in err and "VERDICT" not in out,
               "the stub counts like SQL, so a count on a nullable field "
-              "loses the 40 null rows and reports the layer clean")
+              "returns 0 for the 40 null rows, and the run refuses that "
+              "instead of reporting the layer clean  <-- pinned defect")
         stub.cfg["layer"] = layer(sfha)
+        code, out, err = run_cli(["--url", base + "/"])
+        check(code == 1 and "40 of 100 features" in out,
+              "a trailing slash on the URL is accepted")
 
         # a layer with no null-token class and a gap
         stub.cfg["layer"] = layer(rest(["A,<Null>"], default=False))
@@ -1069,6 +1144,53 @@ def _self_test(tmp):
         check(code == 2 and "code 498" in err,
               "no token against a secured service is an error, exit 2, not "
               "a verdict")
+        # a token file read with $(cat file) ends in a line break
+        os.environ["RENDERGAP_TEST_TOKEN"] = secret + "\r\n"
+        stub.cfg["token"] = secret
+        stub.log[:] = []
+        code, out, err = run_cli(["--url", base, "--token-env",
+                                  "RENDERGAP_TEST_TOKEN"])
+        check(code == 1 and stub.log and all(
+            h == "Bearer " + secret for _, _, h in stub.log),
+            "a token with a trailing line break is stripped and sent clean  "
+            "<-- pinned defect")
+        # a token an HTTP header cannot carry is a usage error that never
+        # quotes the token and never reaches the wire
+        for odd, why in (("abc\ndef-secret-part", "a line break inside"),
+                         ("t\u00f6ken-secret-part", "a non-ASCII character"),
+                         (" \r\n", "nothing but white space")):
+            os.environ["RENDERGAP_TEST_TOKEN"] = odd
+            stub.log[:] = []
+            code, out, err = run_cli(["--url", base, "--token-env",
+                                      "RENDERGAP_TEST_TOKEN"])
+            check(code == 64 and out == "" and stub.log == [] and
+                  "secret-part" not in out + err,
+                  "a token with %s is refused as a usage error, quoted "
+                  "nowhere, with no request made  <-- pinned defect" % why)
+        # a token longer than the error cut is redacted whole
+        long_token = "T" * 150 + "SECRETTAIL" + "U" * 300
+        os.environ["RENDERGAP_TEST_TOKEN"] = long_token
+        stub.cfg["token"] = "some-other-token"
+        code, out, err = run_cli(["--url", base, "--token-env",
+                                  "RENDERGAP_TEST_TOKEN"])
+        check(code == 2 and "code 498" in err and "SECRETTAIL" not in err
+              and "T" * 20 not in err and "***" in err,
+              "a 460 character token that the server echoes is redacted "
+              "whole, not cut at 200 first  <-- pinned defect")
+        # a crash message that quotes the token is redacted too
+        os.environ["RENDERGAP_TEST_TOKEN"] = secret
+        stub.cfg["token"] = secret
+        try:
+            globals()["analyze"] = lambda *a, **k: (_ for _ in ()).throw(
+                RuntimeError("probe quoting " + secret))
+            code, out, err = run_cli(["--url", base, "--token-env",
+                                      "RENDERGAP_TEST_TOKEN"])
+        finally:
+            globals()["analyze"] = real_analyze_wire
+        check(code == 70 and secret not in out + err and
+              "probe quoting ***" in err,
+              "an unexpected crash exits 70 and redacts the token from its "
+              "message and its traceback  <-- pinned defect")
         del os.environ["RENDERGAP_TEST_TOKEN"]
         stub.cfg["token"] = None
 
@@ -1249,6 +1371,35 @@ def _self_test(tmp):
                               "--stats-json", bad_stats])
     check(code == 2 and "no features list" in err,
           "a malformed statistics file exits 2")
+    zero_stats = tmpfile("zero-stats.json", json.dumps(stats([
+        {"KIND": "A", "SUBKIND": None, COUNT_FIELD: 0},
+        {"KIND": "X", "SUBKIND": "", COUNT_FIELD: 60}])))
+    code, out, err = run_cli(["--layer-json", layer_file,
+                              "--stats-json", zero_stats])
+    check(code == 2 and "count of 0" in err and "VERDICT" not in out,
+          "a hand-built statistics file with a zero count is refused, not "
+          "read as an empty null class  <-- pinned defect")
+    groups_doc = layer(rest(["x"]))
+    groups_doc["drawingInfo"]["renderer"]["uniqueValueInfos"] = []
+    groups_doc["drawingInfo"]["renderer"]["uniqueValueGroups"] = [
+        {"classes": [{"value": "A,<Null>", "label": "a"}]}]
+    groups_file = tmpfile("groups.json", json.dumps(groups_doc))
+    code, out, err = run_cli(["--layer-json", groups_file, "--static"])
+    check(code == 4 and "VERDICT: NOT CHECKED" in out and
+          "uniqueValueGroups is not read" in out,
+          "classes held only in uniqueValueGroups exit 4, never a clean 0  "
+          "<-- pinned defect")
+    surrogate = layer(rest(["A,<Null>"]))
+    surrogate["drawingInfo"]["renderer"]["uniqueValueInfos"][0]["label"] = \
+        "\ud800"
+    surrogate_file = tmpfile("surrogate.json", json.dumps(surrogate))
+    target = os.path.join(tmp, "surrogate.csv")
+    code, out, err = run_cli(["--layer-json", surrogate_file, "--static",
+                              "--out", target, "--apply"])
+    check(code == 2 and "could not write" in err and
+          not os.path.exists(target),
+          "a class label that cannot be encoded exits 2 and leaves no file  "
+          "<-- pinned defect")
     root_file = tmpfile("root.json", json.dumps({"layers": []}))
     code, out, err = run_cli(["--layer-json", root_file, "--static"])
     check(code == 4 and "name a layer URL" in out,
@@ -1284,6 +1435,23 @@ def _self_test(tmp):
         code, out, err = run_cli(argv)
         check(code == 64 and out == "", "%s is a usage error, exit 64, with "
               "nothing on stdout" % why)
+
+    precious = tmpfile("precious.txt", "keep me")
+    for extra in (["--apply"], []):
+        code, out, err = run_cli(["--layer-json", layer_file, "--stats-json",
+                                  stats_file, "--out", precious] + extra)
+        with open(precious, encoding="utf-8") as handle:
+            check(code == 64 and "already exists" in err and out == "" and
+                  handle.read() == "keep me",
+                  "an existing --out file is refused%s and keeps its content  "
+                  "<-- pinned defect" % (" under --apply" if extra else
+                                         " on a dry run"))
+
+    with unittest.mock.patch.dict(os.environ, {"RENDERGAP_TEST_TOKEN": "x"}):
+        code, out, err = run_cli(["--layer-json", layer_file, "--static",
+                                  "--token-env", "RENDERGAP_TEST_TOKEN"])
+    check(code == 64 and "--token-env needs --url" in err,
+          "a token variable that is set still needs --url")
 
     with unittest.mock.patch.dict(os.environ, {"RENDERGAP_TEST_TOKEN": "x"}):
         code, out, err = run_cli(["--url", "http://example.invalid/x/0",
@@ -1468,9 +1636,14 @@ def _parse(argv):
     return ap.parse_args(argv)
 
 
-def _same_file(a, b):
-    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(
-        os.path.realpath(b))
+def token_problem(value):
+    """Why a token cannot ride in a header, or None. Never quotes the token."""
+    if not value:
+        return "is not set or is empty"
+    if not (value.isascii() and value.isprintable()):
+        return ("holds a control character or a character outside ASCII, "
+                "which an HTTP header cannot carry")
+    return None
 
 
 def _usage_problem(args):
@@ -1490,8 +1663,10 @@ def _usage_problem(args):
     if args.token_env:
         if not args.url:
             return "--token-env needs --url"
-        if not os.environ.get(args.token_env):
-            return "the environment variable %s is not set" % args.token_env
+        # A token file read with $(cat file) keeps its line ending, so strip.
+        problem = token_problem(os.environ.get(args.token_env, "").strip())
+        if problem:
+            return "the environment variable %s %s" % (args.token_env, problem)
         parts = urllib.parse.urlsplit(args.url)
         if parts.scheme != "https" and parts.hostname not in LOOPBACK:
             return "a token is sent only over https, or to a loopback address"
@@ -1499,11 +1674,8 @@ def _usage_problem(args):
         return "--sample cannot be negative"
     if args.apply and not args.out:
         return "--apply needs --out"
-    if args.out:
-        for source in (args.layer_json, args.stats_json):
-            if source and _same_file(args.out, source):
-                return "--out %s is also an input file. Name a new file." % \
-                    args.out
+    if args.out and os.path.lexists(args.out):
+        return "--out %s already exists. Name a new file." % args.out
     return None
 
 
@@ -1547,17 +1719,22 @@ def main(argv=None):
     """Run the CLI. An error this code did not anticipate exits 70, because 1
     is the code a scheduled job reads as 'a finding'."""
     _tolerate_odd_characters()
+    secrets = []
     try:
-        return _run(argv)
+        return _run(argv, secrets)
     except Exception as exc:
-        print("error: unexpected %s: %s. This is a fault in the tool, not a "
-              "finding about the data." % (type(exc).__name__, exc),
-              file=sys.stderr)
-        traceback.print_exc()
+        # The text of a crash can quote the request that failed, so it goes
+        # through the same redaction as a service error.
+        text = ("error: unexpected %s: %s. This is a fault in the tool, not a "
+                "finding about the data.\n%s"
+                % (type(exc).__name__, exc, traceback.format_exc()))
+        for secret in secrets:
+            text = _redact(text, secret)
+        print(text, file=sys.stderr)
         return 70
 
 
-def _run(argv):
+def _run(argv, secrets):
     try:
         args = _parse(sys.argv[1:] if argv is None else argv)
     except SystemExit as exc:
@@ -1573,7 +1750,8 @@ def _run(argv):
         print("error: %s" % problem, file=sys.stderr)
         return 64
 
-    token = os.environ[args.token_env] if args.token_env else None
+    token = os.environ[args.token_env].strip() if args.token_env else None
+    secrets.append(token)
     source = args.url or args.layer_json
     try:
         report = _collect(args, token)
@@ -1593,7 +1771,7 @@ def _run(argv):
         if args.apply:
             try:
                 write_findings(args.out, report)
-            except (IOError, OSError, csv.Error) as exc:
+            except (IOError, OSError, csv.Error, UnicodeError) as exc:
                 print("error: could not write %s: %s" % (args.out, exc),
                       file=sys.stderr)
                 return 2
