@@ -525,17 +525,29 @@ def read_json(path):
     return doc
 
 
+def cell(value):
+    """A text cell that a spreadsheet will not run as a formula. A cell that
+    starts with = + - @ tab or CR gets one apostrophe in front. The tool never
+    reads its own CSV back, so nothing strips it. A reader that wants the
+    original text removes exactly one leading apostrophe."""
+    if value[:1] in tuple("=+-@" + chr(9) + chr(13)):
+        return "'" + value
+    return value
+
+
 def write_findings(path, report):
     """Create path, which must not exist. A failed write removes the partial
-    file, so a re-run is not refused for a file the tool left behind."""
+    file, so a re-run is not refused for a file the tool left behind. Every
+    text cell is guarded by cell(). The row count stays a number."""
     handle = open(path, "x", newline="", encoding="utf-8")
     try:
         with handle:
             writer = csv.writer(handle)
             writer.writerow(OUT_COLUMNS)
             for f in report.findings:
-                writer.writerow([f.kind, f.severity, f.key,
-                                 "" if f.rows is None else f.rows, f.text])
+                writer.writerow([cell(f.kind), cell(f.severity), cell(f.key),
+                                 "" if f.rows is None else f.rows,
+                                 cell(f.text)])
     except (OSError, csv.Error, UnicodeError):
         os.remove(path)
         raise
@@ -968,6 +980,72 @@ def _self_test(tmp):
     check(not os.path.exists(torn_path),
           "a write that fails part-way leaves no partial file  "
           "<-- pinned defect")
+
+    # ---- formula injection: a text cell a spreadsheet would run as a formula
+    # gets one apostrophe. The row count stays a number.
+    triggers = (("=", "equals"), ("+", "plus"), ("-", "minus"),
+                ("@", "at sign"), ("\t", "tab"), ("\r", "CR"))
+    for lead, name in triggers:
+        check(cell(lead + "x") == "'" + lead + "x",
+              "cell() guards a text that starts with %s" % name)
+    check(cell("") == "" and cell("plain") == "plain" and
+          cell("a=b") == "a=b" and cell(" =x") == " =x" and
+          cell("'x") == "'x" and cell("<Null>,a") == "<Null>,a",
+          "cell() leaves a text that does not start with a trigger alone")
+
+    def csv_rows(name, findings):
+        path = os.path.join(tmp, name)
+        write_findings(path, Report(None, None, None, findings, None, True))
+        with open(path, newline="", encoding="utf-8") as handle:
+            return path, list(csv.reader(handle))
+
+    for lead, name in triggers:
+        probe = lead + "A,x"
+        _, got = csv_rows("inj-%d.csv" % ord(lead),
+                          [Finding(lead + "K", lead + "S", probe, 7,
+                                   lead + "D")])
+        check(got[1] == ["'" + lead + "K", "'" + lead + "S", "'" + probe,
+                         "7", "'" + lead + "D"],
+              "the kind, severity, key and detail cells are each guarded "
+              "when they start with %s  <-- pinned defect" % name)
+        check(all(c[1:] == v for c, v in zip(
+            (got[1][0], got[1][1], got[1][2], got[1][4]),
+            (lead + "K", lead + "S", probe, lead + "D"))),
+              "stripping one leading apostrophe restores the original "
+              "text for %s" % name)
+        check(got[1][3] == "7" and not got[1][3].startswith("'"),
+              "the row count cell stays a number beside a guarded %s key"
+              % name)
+
+    # a class key and a group key come from the portal and the data
+    guard_report = analyze(from_rest(rest(["=cmd,<Null>"])),
+                           {"-5,x": 3, "@a,b": 2, "\tt,u": 1, "\rc,d": 4})
+    _, got = csv_rows("inj-core.csv", guard_report.findings)
+    cells = dict((r[2], r) for r in got[1:])
+    check(set(cells) == set(["'=cmd,<Null>", "'-5,x", "'@a,b",
+                             "'\tt,u", "'\rc,d"]) and
+          cells["'-5,x"][3] == "3" and cells["'\rc,d"][3] == "4",
+          "class keys from the renderer and group keys from the data are "
+          "guarded, including a negative number, a tab and a CR  "
+          "<-- pinned defect")
+
+    # end to end through --apply, with a negative number in the data
+    inj_layer = tmpfile("inj-layer.json", json.dumps(layer(
+        rest(["a,b"], default=False))))
+    inj_stats = tmpfile("inj-stats.json", json.dumps({"features": [
+        {"attributes": {"KIND": -5, "SUBKIND": "x", COUNT_FIELD: 3}},
+        {"attributes": {"KIND": "a", "SUBKIND": "b", COUNT_FIELD: 9}}]}))
+    inj_out = os.path.join(tmp, "inj-cli.csv")
+    code, out, err = run_cli(["--layer-json", inj_layer, "--stats-json",
+                              inj_stats, "--out", inj_out, "--apply"])
+    with open(inj_out, newline="", encoding="utf-8") as handle:
+        inj_rows = list(csv.reader(handle))
+    with open(inj_out, encoding="utf-8", newline="") as handle:
+        inj_raw = handle.read()
+    check(code == 1 and inj_rows[1][:4] == ["HIDDEN", "FAIL", "'-5,x", "3"]
+          and "\r\n-5,x" not in inj_raw and ",-5,x," not in inj_raw,
+          "a -5 in the data is written as '-5,x through --apply, and the "
+          "count stays 3  <-- pinned defect")
 
     # ---- the url check
     check(url_problem("https://host/rest/services/S/MapServer/0") is None,
