@@ -31,6 +31,8 @@ PASS  the query counts the object id field, grouped by the renderer fields  <-- 
 ...
 PASS  the stub counts like SQL, so a count on a nullable field returns 0 for the 40 null rows, and the run refuses that instead of reporting the layer clean  <-- pinned defect
 ...
+PASS  a response cut below the layer's own row count with no flag exits 4, never a clean 0  <-- pinned defect
+...
 PASS  a token with a trailing line break is stripped and sent clean  <-- pinned defect
 ...
 PASS  a 460 character token that the server echoes is redacted whole, not cut at 200 first  <-- pinned defect
@@ -48,6 +50,7 @@ PASS  a trailing space exits 64 with a usage message, not 70  <-- pinned defect
 PASS  a hand-built statistics file with a zero count is refused, not read as an empty null class  <-- pinned defect
 PASS  classes held only in uniqueValueGroups exit 4, never a clean 0  <-- pinned defect
 ...
+PASS  a token pasted where the variable name goes is never echoed in the usage error  <-- pinned defect
 PASS  an existing --out file is refused under --apply and keeps its content  <-- pinned defect
 PASS  a -5 in the data is written as '-5,x through --apply, and the count stays 3  <-- pinned defect
 ...
@@ -56,10 +59,10 @@ PASS  a unique prefix --ap of --apply is REFUSED by the parser and writes nothin
 PASS  the footer reports failures by count and by name, and exits 1  <-- pinned defect
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-239 assertions, 0 failed
+248 assertions, 0 failed
 ```
 
-The full run prints all 239 assertions. Each `...` line above is where this block is cut. Every
+The full run prints all 248 assertions. Each `...` line above is where this block is cut. Every
 other line is copied from the run.
 
 ## What already exists
@@ -93,10 +96,10 @@ shows only that the search found nothing.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package. It reads a layer's REST
 endpoint over HTTP or HTTPS, or two JSON files that you saved.
 
-The self-test prints the same 228 assertions on Windows (Python 3.13.2) and on Ubuntu (Python
+The self-test prints the same 248 assertions on Windows (Python 3.13.2) and on Ubuntu (Python
 3.9.25, 3.11.16 and 3.12.3). The Windows and Ubuntu 3.12.3 outputs are identical line for line after
 the carriage returns are removed. `coverage run --branch rendergap.py --self-test` reports 100
-percent of statements and branches (1046 statements, 242 branches, none partial) on Windows (coverage
+percent of statements and branches (1111 statements, 260 branches, none partial) on Windows (coverage
 7.16.1). No line is excluded from the measurement. Ubuntu has no `coverage` or `pyflakes` module, so
 coverage and the lint were measured on Windows only.
 
@@ -159,7 +162,7 @@ it.
 | 70 | An unexpected crash in the tool. It is never a finding. |
 
 Exit 4 covers a renderer this tool cannot compare, a response that the server cut at its record
-limit, a layer that has no rows, and a `--static` run with no finding. That includes a renderer with no `uniqueValueInfos` entries,
+limit, a layer that has no rows, a group-by whose counts do not add up to the layer's own row count, and a `--static` run with no finding. That includes a renderer with no `uniqueValueInfos` entries,
 such as one that keeps its classes only in `uniqueValueGroups`. A scheduled job that reads 0 as
 "safe" must not get a 0 from a run that compared nothing.
 
@@ -382,6 +385,7 @@ I read these pages on 2026-10-13. The status column says what each page supports
 |---|---|---|
 | `groupByFieldsForStatistics` and `outStatistics` are query parameters. | Documented | [Query (Feature Service/Layer)](https://developers.arcgis.com/rest/services-reference/enterprise/query-feature-service-layer/) |
 | `exceededTransferLimit: false` means there are no more pages. | Documented for paged queries. The page does not say a group-by query returns the flag, so the tool treats `true` as a cut, and also a response as long as the layer's `maxRecordCount` (see Limits). | The same page |
+| `returnCountOnly` returns `{"count": n}`, the number of features the query would return. | Documented, read on 2026-11-11. The page's example response is `{ "count": 48 }`. The tool sends it with `where=1=1`. | The same page |
 | `returnGeometry` takes `true` or `false`. | Documented. The page's list of the "only other parameters" usable with `outStatistics` does not name it. The service I ran accepted it. | The same page |
 | A unique-value renderer has `field1`, `field2`, `field3`, `fieldDelimiter`, `defaultSymbol`, `defaultLabel` and `uniqueValueInfos` with `value`. | Documented | [Renderer objects](https://developers.arcgis.com/rest/services-reference/enterprise/renderer-objects/) |
 | A `defaultSymbol` of `null` assigns no symbol to an unmatched feature. | Documented. The page's known limitation, that a generic symbol may show anyway, is tied to SceneLayers with a mesh geometry type only. | [UniqueValueRenderer](https://developers.arcgis.com/javascript/latest/references/core/renderers/UniqueValueRenderer/) |
@@ -446,7 +450,7 @@ story. The `X;AREA OF MINIMAL FLOOD HAZARD` group may be undrawn on purpose.
   definition expression does to it.
 - A response cut at the server's record limit exits 4 when no class carries the token. The tool does not page through grouped
   results. A layer with more value combinations than the limit needs a higher `maxRecordCount`.
-- The Query page does not say that a group-by response carries `exceededTransferLimit`. The tool therefore also treats a response with as many rows as the layer's `maxRecordCount` as cut and exits 4. A layer whose answer has exactly that many value combinations also exits 4, and a higher `maxRecordCount` clears it. A layer file without `maxRecordCount` gets only the flag check, with one exception: a null-token class that has no rows in the response is then not trusted as latent, because a cut that the server did not flag would look the same. That run reads "cannot be ruled out", does not count the rows, and exits 1. The same silent cut can also hide unmatched values, and no exit code covers that case.
+- The Query page does not say that a group-by response carries `exceededTransferLimit`. The tool therefore also treats a response with as many rows as the layer's `maxRecordCount` as cut and exits 4. A layer whose answer has exactly that many value combinations also exits 4, and a higher `maxRecordCount` clears it. A layer file without `maxRecordCount` gets only the flag check, with one exception: a null-token class that has no rows in the response is then not trusted as latent, because a cut that the server did not flag would look the same. That run reads "cannot be ruled out", does not count the rows, and exits 1. Under `--url` the tool also asks for the layer's own row count (`returnCountOnly`) and compares it with the sum of the group counts. A response that is cut without a flag, or that leaves a group out, then exits 4 with both numbers, or 1 when a class carries the token. A layer file and a statistics file carry no total, so a silent cut in saved files is not caught.
 - A layer with no rows exits 4 only when no class carries the token. Otherwise the null-token class fails the run with exit 1.
 - A group-by over a very large layer can be slow or refused by the service. The public layer above
   has about six million rows and answered in a few seconds. Your service may differ.
@@ -469,6 +473,8 @@ story. The `X;AREA OF MINIMAL FLOOD HAZARD` group may be undrawn on purpose.
 - The loopback test reads the host name only, so a name such as `localhost` that a hosts file points elsewhere still receives the token over plain http.
 - The redaction replaces the exact token text only. A server that echoes the token URL-encoded, in another case or cut short is not redacted.
 - Only a CSV cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return is guarded. The guard does not strip a line feed or a leading space, and the apostrophe stays visible in a viewer that does not treat it as a text marker.
+- A layer response with no `drawingInfo`, such as a Table, exits 4 with a message that says the renderer type is not `uniqueValue`, which reads as if a renderer exists.
+- A run that exits 4 writes no `--out` file even under `--apply`, and does not say so. A job that expects the CSV must check for exit 4 first.
 - A failed `--out` write exits 2 even when findings (exit 1) exist, so read the printed verdict.
 - The text of an unsupported-renderer message comes from the service and is not redacted for the token.
 - If the server sends a reply that is not HTTP at all (a malformed status line), the run exits 70, which reads as a tool fault and not a server fault.
@@ -476,10 +482,9 @@ story. The `X;AREA OF MINIMAL FLOOD HAZARD` group may be undrawn on purpose.
 - A server-controlled string, such as a class label, prints to the console unfiltered, so a hostile service can inject terminal escape sequences into the report.
 - A dry run prints "Check only. X was not written" without checking that the folder of X is writable, so the failure appears only on the `--apply` run.
 - The self-test opens dozens of loopback connections. On a machine that has run out of ephemeral ports (Windows error 10048) its wire assertions fail with "could not reach", and a re-run after the sockets drain passes.
-- The tool never compares the sum of the group counts with the layer's feature total. A server that left null groups out of the group-by would show a null-token class as latent.
-- An empty layer that has a null-token class exits 1 and prints "rows not counted" and "the data was not compared". The data was compared and held no rows.
+- Under `--url` the count check is a second query, not one snapshot. A layer that is edited between the two queries exits 4 with a count mismatch, and a re-run clears it. A service that answers `returnCountOnly` with a different `where` meaning than the group-by is not detected.
+- An empty layer that has a null-token class exits 1 and prints "rows not counted" and "the data was not compared". The tool stops at "the layer has no rows" and reports no compared groups.
 - A server-supplied string, such as a renderer type or a class label, prints to stdout without redaction, and a class label also goes to the CSV. A service that echoes the token into one of them leaks it.
-- `--token-env` takes a variable name. A token typed there by mistake is echoed in the usage error (exit 64), so it can reach a scheduler log.
 - OWASP warns that the apostrophe prefix is not reliable in Excel after the CSV is saved and reopened, and it also lists line feed and full-width `=` `+` `-` `@` as triggers, which this tool does not guard.
 - A leading apostrophe in the CSV may be the guard or the original text, so stripping it is lossy for data that began with an apostrophe.
 - The CSV is UTF-8 with no byte order mark. Import it as UTF-8 in Excel, because a double click may show non-ASCII keys as garbled text.

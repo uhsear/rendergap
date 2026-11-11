@@ -1118,6 +1118,9 @@ def _self_test(tmp):
             if parsed.path == "/svc/MapServer/0":
                 return self._send(200, cfg["layer"])
             if parsed.path == "/svc/MapServer/0/query":
+                if query.get("returnCountOnly") == "true":
+                    return self._send(200, {"count": cfg.get(
+                        "count", len(cfg["rows"]))})
                 spec = json.loads(query["outStatistics"])[0]
                 fields = query["groupByFieldsForStatistics"].split(",")
                 counted = {}
@@ -1134,14 +1137,14 @@ def _self_test(tmp):
                     for key, n in counted.items()]
                 limit = cfg["limit"]
                 body = {"features": features[:limit]}
-                if len(features) > limit:
+                if len(features) > limit and cfg.get("flag", True):
                     body["exceededTransferLimit"] = True
                 return self._send(200, body)
             return self._send(404, b"not here")
 
     def start():
         server = HTTPServer(("127.0.0.1", 0), Stub)
-        server.cfg = {"raw": {}, "token": None, "limit": 1000,
+        server.cfg = {"raw": {}, "token": None, "limit": 1000, "flag": True,
                       "layer": layer(sfha), "rows": []}
         server.log = []
         threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -1218,6 +1221,36 @@ def _self_test(tmp):
               "a covered layer exits 0 over the wire")
         stub.cfg["rows"] = rows
 
+        # a server that cuts the answer and does not say so
+        stub.cfg["layer"] = layer(rest(["A,x", "X,", "B,y"]))
+        stub.cfg["limit"], stub.cfg["flag"] = 1, False
+        stub.log[:] = []
+        code, out, err = run_cli(["--url", base])
+        check(code == 4 and "add up to 40 rows but the layer reports 100"
+              in out and "VERDICT: clean" not in out and
+              any(q.get("returnCountOnly") == "true" for _, q, _ in stub.log),
+              "a response cut below the layer's own row count with no flag "
+              "exits 4, never a clean 0  <-- pinned defect")
+        stub.cfg["limit"], stub.cfg["flag"] = 1000, True
+        stub.cfg["count"] = 101
+        code, out, err = run_cli(["--url", base])
+        check(code == 4 and "reports 101" in out,
+              "a layer that gained a row between the two queries exits 4, "
+              "not a verdict on stale counts")
+        for bad in ("many", -1, True, None):
+            stub.cfg["count"] = bad
+            code, out, err = run_cli(["--url", base])
+            check(code == 2 and "no whole-number count" in err and
+                  "VERDICT" not in out,
+                  "a count response holding %r is refused, exit 2" % (bad,))
+        del stub.cfg["count"]
+        stub.cfg["raw"]["/svc/MapServer/0/query"] = (
+            200, [], {"error": {"code": 400, "message": "no count"}})
+        code, out, err = run_cli(["--url", base])
+        check(code == 2 and "no count" in err,
+              "a service that cannot count says so, exit 2")
+        del stub.cfg["raw"]["/svc/MapServer/0/query"]
+
         # the token travels in a header, and never anywhere else
         secret = "s3cr3t-token-value"
         os.environ["RENDERGAP_TEST_TOKEN"] = secret
@@ -1231,7 +1264,7 @@ def _self_test(tmp):
         with open(out_file, encoding="utf-8") as handle:
             written = handle.read()
         check(code == 1 and all(h == "Bearer " + secret for _, _, h in
-                                stub.log) and len(stub.log) == 2,
+                                stub.log) and len(stub.log) == 3,
               "the token is sent as an X-Esri-Authorization bearer header on "
               "both requests")
         check(all(secret not in q.values() for _, q, _ in stub.log) and
@@ -1572,6 +1605,8 @@ def _self_test(tmp):
          "a token without a url"),
         (["--url", "https://h/x/0", "--token-env", "RENDERGAP_UNSET_VAR"],
          "an unset token variable"),
+        (["--url", "https://h/x/0", "--token-env", "pasted-secret-7f3a"],
+         "a token pasted where the variable name goes"),
         (["--layer-json", layer_file, "--static", "--sample", "-1"],
          "a negative sample"),
         (["--layer-json", layer_file, "--static", "--apply"],
@@ -1588,6 +1623,13 @@ def _self_test(tmp):
         code, out, err = run_cli(argv)
         check(code == 64 and out == "", "%s is a usage error, exit 64, with "
               "nothing on stdout" % why)
+
+    code, out, err = run_cli(["--url", "https://h/x/0", "--token-env",
+                              "pasted-secret-7f3a"])
+    check(code == 64 and "is not set or is empty" in err and
+          "pasted-secret-7f3a" not in out + err,
+          "a token pasted where the variable name goes is never echoed in "
+          "the usage error  <-- pinned defect")
 
     precious = tmpfile("precious.txt", "keep me")
     for extra in (["--apply"], []):
@@ -1819,7 +1861,9 @@ def _usage_problem(args):
         # A token file read with $(cat file) keeps its line ending, so strip.
         problem = token_problem(os.environ.get(args.token_env, "").strip())
         if problem:
-            return "the environment variable %s %s" % (args.token_env, problem)
+            # The variable name is not echoed: a token pasted here by mistake
+            # would reach the console or a scheduler log.
+            return "the environment variable named by --token-env %s" % problem
         parts = urllib.parse.urlsplit(args.url)
         if parts.scheme != "https" and parts.hostname not in LOOPBACK:
             return "a token is sent only over https, or to a loopback address"
@@ -1851,6 +1895,23 @@ def _unverified_latent(renderer, layer, groups):
     return not _has_record_limit(layer) and any(
         has_null_token(key, renderer.delimiter) and not groups.get(key)
         for key, label in renderer.classes)
+
+
+def _count_problem(url, groups, token):
+    """Why the group counts cannot be trusted, or None. One returnCountOnly
+    query gives the layer's own total, which catches a cut the server did not
+    flag and a group left out of the response."""
+    doc = get_json(url.rstrip("/") + "/query",
+                   {"f": "json", "where": "1=1", "returnCountOnly": "true"},
+                   token)
+    total = doc.get("count")
+    if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+        raise SourceError("the count response has no whole-number count")
+    if total == sum(groups.values()):
+        return None
+    return ("the group counts add up to %d rows but the layer reports %d, so "
+            "the response is partial or the layer changed during the run"
+            % (sum(groups.values()), total))
 
 
 def _collect(args, token):
@@ -1888,6 +1949,10 @@ def _collect(args, token):
             incomplete = ("a null-token class has no rows in the response, "
                           "and the layer names no maxRecordCount, so a cut "
                           "that the server did not flag cannot be ruled out")
+        elif args.url:
+            incomplete = _count_problem(args.url, groups, token)
+            if incomplete:
+                groups = None
     return analyze(renderer, groups, incomplete, args.static)
 
 
