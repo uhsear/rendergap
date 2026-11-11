@@ -9,7 +9,7 @@ text `<Null>` in place of the value, so the class value reads `A,<Null>`.
 The server draws those rows. A web map in a browser did not. Close to two in five of the layer's
 pop-ups were gone, and nobody had changed a symbol. The fix was a renderer on the zone field alone.
 
-The check everybody writes first does not see this. It lists the values in the data that no class
+The check most people write first does not see this. It lists the values in the data that no class
 covers. Here every value has a class, so that list is empty and the layer reads as clean. The only
 way to see the problem is to count the rows that sit in a class whose value carries the token.
 
@@ -41,6 +41,9 @@ PASS  a JSON error body under HTTP 200 is an error, not a layer  <-- pinned defe
 PASS  a response cut at the limit with nothing else flagged exits 4, never 0  <-- pinned defect
 PASS  a response as long as maxRecordCount with no exceededTransferLimit exits 4, never a clean 0  <-- pinned defect
 PASS  a layer with no rows compared nothing, so exit 4  <-- pinned defect
+PASS  --static on a clean renderer exits 4, not a clean 0  <-- pinned defect
+PASS  a latent null-token class with no maxRecordCount to check the response against is not reported clean  <-- pinned defect
+PASS  a trailing space exits 64 with a usage message, not 70  <-- pinned defect
 ...
 PASS  a hand-built statistics file with a zero count is refused, not read as an empty null class  <-- pinned defect
 PASS  classes held only in uniqueValueGroups exit 4, never a clean 0  <-- pinned defect
@@ -53,10 +56,10 @@ PASS  a unique prefix --ap of --apply is REFUSED by the parser and writes nothin
 PASS  the footer reports failures by count and by name, and exits 1  <-- pinned defect
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-228 assertions, 0 failed
+239 assertions, 0 failed
 ```
 
-The full run prints all 228 assertions. Each `...` line above is where this block is cut. Every
+The full run prints all 239 assertions. Each `...` line above is where this block is cut. Every
 other line is copied from the run.
 
 ## What already exists
@@ -148,19 +151,20 @@ it.
 
 | Code | Meaning |
 |---|---|
-| 0 | The data was compared and nothing was flagged. Also a `--static` run with no finding. |
+| 0 | The data was compared and nothing was flagged. |
 | 1 | At least one finding that can lose features. A lint counts only under `--fail-on-lint`. |
 | 2 | A source could not be read, the service returned an error, or `--out` could not be written. |
-| 4 | Nothing was compared. See below. |
+| 4 | Nothing was compared, or the comparison could not be trusted. See below. |
 | 64 | Usage error. |
 | 70 | An unexpected crash in the tool. It is never a finding. |
 
 Exit 4 covers a renderer this tool cannot compare, a response that the server cut at its record
-limit, and a layer that has no rows. That includes a renderer with no `uniqueValueInfos` entries,
+limit, a layer that has no rows, and a `--static` run with no finding. That includes a renderer with no `uniqueValueInfos` entries,
 such as one that keeps its classes only in `uniqueValueGroups`. A scheduled job that reads 0 as
 "safe" must not get a 0 from a run that compared nothing.
 
-A cut response or an empty layer exits 4 only when no class carries the token. If a class does, the
+A `--static` run never exits 0, because it looked at no data. A cut response or an empty layer
+exits 4 only when no class carries the token. If a class does, the
 run exits 1 with "rows not counted", because the class is a risk whether or not the rows were
 counted.
 
@@ -171,7 +175,7 @@ default symbol. `stats.json` holds the group-by response.
 
 ```
 $ cat layer.json
-{"name":"zones","objectIdField":"OBJECTID","drawingInfo":{"renderer":{"type":"uniqueValue","field1":"ZONE","field2":"SUBTYPE","fieldDelimiter":",","uniqueValueInfos":[{"value":"A,<Null>","label":"Zone A","symbol":{...}},{"value":"AE,<Null>","label":"Zone AE","symbol":{...}},{"value":"X,","label":"Zone X","symbol":{...}}]}}}
+{"name":"zones","objectIdField":"OBJECTID","drawingInfo":{"renderer":{"type":"uniqueValue","field1":"ZONE","field2":"SUBTYPE","fieldDelimiter":",","uniqueValueInfos":[{"value":"A,<Null>","label":"Zone A","symbol":{"type":"esriSFS"}},{"value":"AE,<Null>","label":"Zone AE","symbol":{"type":"esriSFS"}},{"value":"X,","label":"Zone X","symbol":{"type":"esriSFS"}}]}}}
 $ cat stats.json
 {"features":[{"attributes":{"ZONE":"A","SUBTYPE":null,"rendergap_n":40}},{"attributes":{"ZONE":"AE","SUBTYPE":null,"rendergap_n":25}},{"attributes":{"ZONE":"X","SUBTYPE":"","rendergap_n":30}},{"attributes":{"ZONE":"B","SUBTYPE":"y","rendergap_n":5}}]}
 $ python rendergap.py --layer-json layer.json --stats-json stats.json
@@ -189,7 +193,7 @@ value combinations with no class and no default symbol: (1)
 VERDICT: 3 finding(s). The features in these groups may draw no symbol or lose their pop-up in a client.
 ```
 
-The `...` inside `symbol` stands for a short symbol object that the demo leaves out of this page.
+The two `cat` lines are real files. Each `symbol` is the shortest object the tool accepts, and a real layer holds a full one.
 
 The tool reads each null in the data as the text `<Null>`, joins the values with the renderer's
 delimiter, and compares the result with the class values as text. A null is not an empty string.
@@ -273,7 +277,7 @@ no default symbol, so a value added later will have none: (1)
 ...
 ```
 
-A `--static` run with no finding exits 0, and its verdict says it was a static check.
+A `--static` run with no finding exits 4 and says "NOT CHECKED", because it looked at no data.
 
 ## How it asks the data
 
@@ -421,7 +425,8 @@ group with no class, `X;AREA OF MINIMAL FLOOD HAZARD`, holds about one feature i
 code was 1.
 
 The run took a few seconds on 2026-10-13. One earlier attempt on the same day ended with a
-connection reset, so the tool exited 2. I did not add a retry.
+connection reset, so the tool exited 2. I did not add a retry. The timings and the class and row counts are dated
+observations, not claims that the self-test checks. The public service has since changed: it reported 128 classes on 2026-11-11.
 
 This shows that the tool runs end to end against a real service. It does not show that any client
 drops these features. I tested no client against this layer, and the layer is not the one in the
@@ -441,7 +446,7 @@ story. The `X;AREA OF MINIMAL FLOOD HAZARD` group may be undrawn on purpose.
   definition expression does to it.
 - A response cut at the server's record limit exits 4 when no class carries the token. The tool does not page through grouped
   results. A layer with more value combinations than the limit needs a higher `maxRecordCount`.
-- The Query page does not say that a group-by response carries `exceededTransferLimit`. The tool therefore also treats a response with as many rows as the layer's `maxRecordCount` as cut and exits 4. A layer whose answer has exactly that many value combinations also exits 4, and a higher `maxRecordCount` clears it. A layer file without `maxRecordCount` gets only the flag check.
+- The Query page does not say that a group-by response carries `exceededTransferLimit`. The tool therefore also treats a response with as many rows as the layer's `maxRecordCount` as cut and exits 4. A layer whose answer has exactly that many value combinations also exits 4, and a higher `maxRecordCount` clears it. A layer file without `maxRecordCount` gets only the flag check, with one exception: a null-token class that has no rows in the response is then not trusted as latent, because a cut that the server did not flag would look the same. That run reads "cannot be ruled out", does not count the rows, and exits 1. The same silent cut can also hide unmatched values, and no exit code covers that case.
 - A layer with no rows exits 4 only when no class carries the token. Otherwise the null-token class fails the run with exit 1.
 - A group-by over a very large layer can be slow or refused by the service. The public layer above
   has about six million rows and answered in a few seconds. Your service may differ.
@@ -453,12 +458,12 @@ story. The `X;AREA OF MINIMAL FLOOD HAZARD` group may be undrawn on purpose.
 - Two classes with the same value give two `NULL_TOKEN` findings, which inflates the finding count.
 - A layer that leaves some values undrawn on purpose, such as the `X;AREA OF MINIMAL FLOOD HAZARD` group above, exits 1. The tool cannot tell a deliberate gap from a mistake.
 - `--static` finds null-token classes and a missing default symbol, but not the values that are actually unmatched.
-- A `--static` run with no finding exits 0 although the tool did not look at the data. The verdict says so, but a job that reads only the exit code cannot tell it from a compared clean run.
+- A `--static` run never exits 0. A run that finds no defect exits 4, so a job cannot read it as a compared clean run.
 - Malformed groups, classes or values in a layer file are skipped without a message. A dropped null-token class can then give exit 0 when a default symbol exists. It takes a damaged file.
 - A layer file saved by Windows PowerShell 5 redirection is UTF-16, and the tool reports it as "is not JSON" (exit 2), which hides the real cause.
 - The "Layer files" section quotes facts from a file made with `arcpy` 3.6 and a run on five rows. The repo holds no such file, so you cannot reproduce them.
 - A `--url` that ends in `?` passes the URL check and sends `??f=json`, which most servers answer with a page that is not JSON (exit 2).
-- A malformed `--url`, such as `http://[::1/x`, one with a space in it, or one with a non-ASCII host name, exits 70 with a traceback instead of 64.
+- A `--url` with a space, a control character, a non-ASCII character (write a host name in punycode), a bad port or an unclosed IPv6 bracket exits 64 before any request. The self-test pins each of these cases.
 - A server that does not speak HTTP, such as a TLS alert on a plain http port, exits 70 with a traceback instead of 2.
 - If `HTTP_PROXY` is set, a token sent to a loopback http address goes to the proxy in clear text, because the tool does not bypass the proxy for loopback. The self-test sets `NO_PROXY` for itself.
 - The loopback test reads the host name only, so a name such as `localhost` that a hosts file points elsewhere still receives the token over plain http.
@@ -471,6 +476,14 @@ story. The `X;AREA OF MINIMAL FLOOD HAZARD` group may be undrawn on purpose.
 - A server-controlled string, such as a class label, prints to the console unfiltered, so a hostile service can inject terminal escape sequences into the report.
 - A dry run prints "Check only. X was not written" without checking that the folder of X is writable, so the failure appears only on the `--apply` run.
 - The self-test opens dozens of loopback connections. On a machine that has run out of ephemeral ports (Windows error 10048) its wire assertions fail with "could not reach", and a re-run after the sockets drain passes.
+- The tool never compares the sum of the group counts with the layer's feature total. A server that left null groups out of the group-by would show a null-token class as latent.
+- An empty layer that has a null-token class exits 1 and prints "rows not counted" and "the data was not compared". The data was compared and held no rows.
+- A server-supplied string, such as a renderer type or a class label, prints to stdout without redaction, and a class label also goes to the CSV. A service that echoes the token into one of them leaks it.
+- `--token-env` takes a variable name. A token typed there by mistake is echoed in the usage error (exit 64), so it can reach a scheduler log.
+- OWASP warns that the apostrophe prefix is not reliable in Excel after the CSV is saved and reopened, and it also lists line feed and full-width `=` `+` `-` `@` as triggers, which this tool does not guard.
+- A leading apostrophe in the CSV may be the guard or the original text, so stripping it is lossy for data that began with an apostrophe.
+- The CSV is UTF-8 with no byte order mark. Import it as UTF-8 in Excel, because a double click may show non-ASCII keys as garbled text.
+- A failed `--self-test` exits 1, the same code as "findings exist". Do not schedule it beside a findings gate.
 - Nothing here checks a hosted layer's own client-side renderer in a web map. Save that JSON and use
   `--layer-json` with `--stats-json`.
 

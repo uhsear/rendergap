@@ -343,6 +343,8 @@ def _quote(key):
 def analyze(renderer, groups, incomplete=None, static=False):
     """The findings. groups is None when the data was not compared."""
     findings = []
+    if static and groups is None and incomplete is None:
+        incomplete = "this was a static check, the data was not queried"
     total = None if groups is None else sum(groups.values())
     labels = {}
     for key, label in renderer.classes:
@@ -433,9 +435,6 @@ def describe(report, sample=DEFAULT_SAMPLE, fail_on_lint=False):
     elif code == 4:
         out.append("VERDICT: NOT CHECKED. The data was not compared, so this "
                    "is not a clean result.")
-    elif report.static:
-        out.append("VERDICT: no renderer defect found. This was a static "
-                   "check: the data was not queried.")
     else:
         latent = sum(1 for f in report.findings if f.kind == NULL_CLASS)
         if latent:
@@ -460,7 +459,14 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def url_problem(url):
     """Why a --url is refused, or None. The token never rides in the URL."""
-    parts = urllib.parse.urlsplit(url)
+    if not url.isascii() or not url.isprintable() or " " in url:
+        return ("--url must be plain ASCII with no space or control "
+                "character. Write a non-ASCII host name in punycode.")
+    try:
+        parts = urllib.parse.urlsplit(url)
+        parts.port  # raises ValueError on a bad port
+    except ValueError:
+        return "--url is not a valid address (check the host and the port)"
     if parts.scheme not in ("http", "https") or not parts.netloc:
         return "--url must be an http or https address"
     if "@" in parts.netloc:
@@ -617,6 +623,7 @@ def _self_test(tmp):
 
     def layer(renderer, oid="OBJECTID"):
         doc = {"name": "widgets", "drawingInfo": {"renderer": renderer},
+               "maxRecordCount": 1000,
                "objectIdField": oid, "fields": [
                    {"name": "OBJECTID", "type": "esriFieldTypeOID"}]}
         return doc
@@ -741,7 +748,12 @@ def _self_test(tmp):
     report = analyze(from_rest(rest(["A,x"])), None, incomplete="cut")
     check(gate(report) == 4, "an incomplete run with no finding exits 4")
     report = analyze(from_rest(rest(["A,x"])), None, static=True)
-    check(gate(report) == 0, "a static run with no finding exits 0")
+    check(gate(report) == 4 and "static check" in report.incomplete,
+          "a static run with no finding exits 4, never a clean 0  "
+          "<-- pinned defect")
+    report = analyze(bare, None, static=True, incomplete="cut")
+    check(report.incomplete == "cut",
+          "a reason that is already given is kept on a static run")
 
     # ---- REST renderer parsing
     check(from_rest(rest(["a"], fields=("KIND",))).fields == ["KIND"],
@@ -934,7 +946,7 @@ def _self_test(tmp):
           "a covered layer reads as clean")
     lines = describe(analyze(bare, None, static=True))
     check("data: not queried (--static)" in lines and
-          "static check" in lines[-1],
+          lines[-1].startswith("VERDICT: NOT CHECKED."),
           "a static report says the data was not queried")
     lines = describe(analyze(bare, None, incomplete="cut at the limit"))
     check("data: not compared. cut at the limit" in lines and
@@ -1061,6 +1073,19 @@ def _self_test(tmp):
                          ("https://host/x?token=abc", "a URL with a query"),
                          ("https://host/x#frag", "a URL with a fragment")):
         check(url_problem(bad_url) is not None, "%s is refused" % why)
+    for bad_url, why in (("http://127.0.0.1:1/x/0 ", "a trailing space"),
+                         ("http://127.0.0.1:1/x y/0", "a space in the path"),
+                         ("http://127.0.0.1:1/x\t/0", "a tab"),
+                         ("http://127.0.0.1:abc/x/0", "a non-numeric port"),
+                         ("http://127.0.0.1:99999/x/0", "a port over 65535"),
+                         ("http://[::1/x/0", "an unclosed IPv6 bracket"),
+                         ("http://\u00fcn\u00efcode.invalid/x/0",
+                          "a non-ASCII host name")):
+        code, out, err = run_cli(["--url", bad_url])
+        check(code == 64 and "error: --url" in err and "Traceback" not in err
+              and out == "",
+              "%s exits 64 with a usage message, not 70  <-- pinned defect"
+              % why)
 
     # ---- the stub service, and every network path against it
     class Stub(BaseHTTPRequestHandler):
@@ -1405,8 +1430,9 @@ def _self_test(tmp):
               "--static still fails on a token class it can see")
         clean_layer = tmpfile("clean.json", json.dumps(layer(rest(["X,"]))))
         code, out, err = run_cli(["--layer-json", clean_layer, "--static"])
-        check(code == 0 and "static check" in out,
-              "--static on a clean renderer exits 0 and says it was static")
+        check(code == 4 and "NOT CHECKED" in out and "VERDICT: no" not in out,
+              "--static on a clean renderer exits 4, not a clean 0  "
+              "<-- pinned defect")
         lyrx_file = tmpfile("l.lyrx", "\ufeff" + json.dumps(
             {"layerDefinitions": [{"renderer": cim([("A", "<Null>")],
                                                     default=False,
@@ -1422,7 +1448,7 @@ def _self_test(tmp):
             {"layerDefinitions": [{"renderer": cim([("A", "x")],
                                                     default=False)}]}))
         code, out, err = run_cli(["--layer-json", lyrx_ok, "--static"])
-        check(code == 0, "a lint alone does not fail the run")
+        check(code == 4, "a lint alone does not exit 1 on a static run")
         code, out, err = run_cli(["--layer-json", lyrx_ok, "--static",
                                   "--fail-on-lint"])
         check(code == 1 and "VERDICT: 1 finding(s)" in out,
@@ -1450,6 +1476,32 @@ def _self_test(tmp):
         code, out, err = run_cli(["--layer-json", limited_file,
                                   "--stats-json", two_rows])
         check(code == want and (want != 4 or "maxRecordCount" in out), label)
+
+    # ---- a group-by answer with no record limit to check it against
+    no_limit = layer(rest(["A,<Null>", "B,y"]))
+    del no_limit["maxRecordCount"]
+    no_limit_file = tmpfile("no-limit.json", json.dumps(no_limit))
+    only_b = tmpfile("only-b.json", json.dumps(stats([
+        {"KIND": "B", "SUBKIND": "y", COUNT_FIELD: 30}])))
+    code, out, err = run_cli(["--layer-json", no_limit_file,
+                              "--stats-json", only_b])
+    check(code == 1 and "cannot be ruled out" in out and
+          "VERDICT: clean" not in out,
+          "a latent null-token class with no maxRecordCount to check the "
+          "response against is not reported clean  <-- pinned defect")
+    no_limit["maxRecordCount"] = 1000
+    code, out, err = run_cli(["--layer-json", tmpfile(
+        "with-limit.json", json.dumps(no_limit)), "--stats-json", only_b])
+    check(code == 0 and "latent null-token" in out,
+          "the same response with a maxRecordCount to check it against is "
+          "compared, and the class stays latent")
+    del no_limit["maxRecordCount"]
+    no_limit["drawingInfo"]["renderer"] = rest(["B,y"])
+    code, out, err = run_cli(["--layer-json", tmpfile(
+        "no-null-class.json", json.dumps(no_limit)), "--stats-json", only_b])
+    check(code == 0 and "VERDICT: clean." in out,
+          "with no null-token class there is nothing latent to doubt, so a "
+          "layer file with no maxRecordCount is still compared")
 
     # ---- bad files and bad usage
     code, out, err = run_cli(["--layer-json", os.path.join(tmp, "nope.json"),
@@ -1783,9 +1835,22 @@ def _usage_problem(args):
 def _fills_record_limit(layer, stats):
     """True when a group-by response is as long as the layer's maxRecordCount.
     A server may cut the answer without setting exceededTransferLimit."""
+    return (_has_record_limit(layer)
+            and layer["maxRecordCount"] <= len(stats["features"]))
+
+
+def _has_record_limit(layer):
     limit = layer.get("maxRecordCount")
-    return (isinstance(limit, int) and not isinstance(limit, bool)
-            and 0 < limit <= len(stats["features"]))
+    return isinstance(limit, int) and not isinstance(limit, bool) and limit > 0
+
+
+def _unverified_latent(renderer, layer, groups):
+    """True when a null-token class reads as latent (no rows) and the layer
+    gives no record limit to check the response against. A cut that the
+    server did not flag would look the same."""
+    return not _has_record_limit(layer) and any(
+        has_null_token(key, renderer.delimiter) and not groups.get(key)
+        for key, label in renderer.classes)
 
 
 def _collect(args, token):
@@ -1818,6 +1883,11 @@ def _collect(args, token):
         elif not sum(groups.values()):
             groups = None
             incomplete = "the layer has no rows, so there is nothing to compare"
+        elif _unverified_latent(renderer, layer, groups):
+            groups = None
+            incomplete = ("a null-token class has no rows in the response, "
+                          "and the layer names no maxRecordCount, so a cut "
+                          "that the server did not flag cannot be ruled out")
     return analyze(renderer, groups, incomplete, args.static)
 
 
