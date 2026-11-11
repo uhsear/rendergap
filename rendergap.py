@@ -962,10 +962,14 @@ def _self_test(tmp):
     check(rows[0] == list(OUT_COLUMNS) and rows[1][0] == NULL_CLASS and
           rows[1][3] == "40",
           "the findings file has its header and a row per finding")
-    kept = open(out_path, encoding="utf-8").read()
+    def slurp(path):
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+
+    kept = slurp(out_path)
     raises(FileExistsError, lambda: write_findings(out_path, report),
            "the writer refuses a file that already exists  <-- pinned defect")
-    check(open(out_path, encoding="utf-8").read() == kept,
+    check(slurp(out_path) == kept,
           "the refused file is left as it was")
     out_path = os.path.join(tmp, "findings-static.csv")
     write_findings(out_path, analyze(bare, None, static=True))
@@ -1428,6 +1432,25 @@ def _self_test(tmp):
         stop(other)
         environment.stop()
 
+    # ---- a group-by answer that fills the layer's record limit
+    two_rows = tmpfile("two-rows.json", json.dumps(stats([
+        {"KIND": "A", "SUBKIND": "x", COUNT_FIELD: 3},
+        {"KIND": "B", "SUBKIND": "y", COUNT_FIELD: 5}])))
+    for limit, want, label in (
+            (2, 4, "a response as long as maxRecordCount with no "
+                   "exceededTransferLimit exits 4, never a clean 0  "
+                   "<-- pinned defect"),
+            (3, 0, "a response shorter than maxRecordCount is compared"),
+            (0, 0, "a zero maxRecordCount is ignored"),
+            (True, 0, "a boolean maxRecordCount is ignored"),
+            ("2", 0, "a text maxRecordCount is ignored")):
+        limited = layer(rest(["A,x", "B,y"]))
+        limited["maxRecordCount"] = limit
+        limited_file = tmpfile("limited.json", json.dumps(limited))
+        code, out, err = run_cli(["--layer-json", limited_file,
+                                  "--stats-json", two_rows])
+        check(code == want and (want != 4 or "maxRecordCount" in out), label)
+
     # ---- bad files and bad usage
     code, out, err = run_cli(["--layer-json", os.path.join(tmp, "nope.json"),
                               "--static"])
@@ -1757,6 +1780,14 @@ def _usage_problem(args):
     return None
 
 
+def _fills_record_limit(layer, stats):
+    """True when a group-by response is as long as the layer's maxRecordCount.
+    A server may cut the answer without setting exceededTransferLimit."""
+    limit = layer.get("maxRecordCount")
+    return (isinstance(limit, int) and not isinstance(limit, bool)
+            and 0 < limit <= len(stats["features"]))
+
+
 def _collect(args, token):
     if args.url:
         layer = get_json(args.url.rstrip("/"), {"f": "json"}, token)
@@ -1779,6 +1810,11 @@ def _collect(args, token):
             groups = None
             incomplete = ("the service cut its answer at its record limit "
                           "(exceededTransferLimit), so the counts are partial")
+        elif _fills_record_limit(layer, stats):
+            groups = None
+            incomplete = ("the response holds %d rows, as many as the "
+                          "layer's maxRecordCount, so the counts may be "
+                          "partial" % len(stats["features"]))
         elif not sum(groups.values()):
             groups = None
             incomplete = "the layer has no rows, so there is nothing to compare"

@@ -39,22 +39,24 @@ PASS  a redirect is refused and the second host never sees the request  <-- pinn
 PASS  a JSON error body under HTTP 200 is an error, not a layer  <-- pinned defect
 ...
 PASS  a response cut at the limit with nothing else flagged exits 4, never 0  <-- pinned defect
+PASS  a response as long as maxRecordCount with no exceededTransferLimit exits 4, never a clean 0  <-- pinned defect
 PASS  a layer with no rows compared nothing, so exit 4  <-- pinned defect
 ...
 PASS  a hand-built statistics file with a zero count is refused, not read as an empty null class  <-- pinned defect
 PASS  classes held only in uniqueValueGroups exit 4, never a clean 0  <-- pinned defect
 ...
 PASS  an existing --out file is refused under --apply and keeps its content  <-- pinned defect
+PASS  a -5 in the data is written as '-5,x through --apply, and the count stays 3  <-- pinned defect
 ...
 PASS  a unique prefix --ap of --apply is REFUSED by the parser and writes nothing  <-- pinned defect
 ...
 PASS  the footer reports failures by count and by name, and exits 1  <-- pinned defect
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-196 assertions, 0 failed
+228 assertions, 0 failed
 ```
 
-The full run prints all 196 assertions. Each `...` line above is where this block is cut. Every
+The full run prints all 228 assertions. Each `...` line above is where this block is cut. Every
 other line is copied from the run.
 
 ## What already exists
@@ -88,11 +90,12 @@ shows only that the search found nothing.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package. It reads a layer's REST
 endpoint over HTTP or HTTPS, or two JSON files that you saved.
 
-The self-test prints the same 196 assertions on Windows (Python 3.13.2) and on Ubuntu (Python
-3.9.25, 3.10.21 and 3.12.3). The Windows and Ubuntu 3.12.3 outputs are identical line for line after
+The self-test prints the same 228 assertions on Windows (Python 3.13.2) and on Ubuntu (Python
+3.9.25, 3.11.16 and 3.12.3). The Windows and Ubuntu 3.12.3 outputs are identical line for line after
 the carriage returns are removed. `coverage run --branch rendergap.py --self-test` reports 100
-percent of statements and branches (998 statements, 232 branches, none partial) on Windows (coverage
-7.16.1) and on Ubuntu 3.12.3 (coverage 7.16.2). No line is excluded from the measurement.
+percent of statements and branches (1046 statements, 242 branches, none partial) on Windows (coverage
+7.16.1). No line is excluded from the measurement. Ubuntu has no `coverage` or `pyflakes` module, so
+coverage and the lint were measured on Windows only.
 
 The self-test starts a stub server on `127.0.0.1` with `http.server`. Every network path in this
 README runs against that stub: the token header, the redirect, the error body under HTTP 200, a
@@ -225,6 +228,15 @@ the tool still exits 1.
 `--out` writes a CSV with the columns `kind`, `severity`, `key`, `rows` and `detail`. Without
 `--apply` the tool says so and writes nothing. A second `--apply` run with the same path is
 refused, because the file now exists.
+
+A text cell (`kind`, `severity`, `key`, `detail`) that starts with `=`, `+`, `-`, `@`, a tab or a
+carriage return gets one apostrophe in front, so a spreadsheet reads it as text and not as a
+formula ([OWASP: CSV Injection](https://owasp.org/www-community/attacks/CSV_Injection) lists those
+triggers and the single-quote prefix). A key built from the data, such as `-5,x`, is stored as
+`'-5,x`. The `rows` column stays a plain number. The tool never reads its own CSV back. A reader
+that wants the original text removes exactly one leading apostrophe from a cell that began with one
+of those characters. The self-test pins each trigger on each text column, and an end-to-end
+`--apply` run with a `-5` key.
 
 ```
 $ python rendergap.py --layer-json layer.json --stats-json stats.json --out findings.csv
@@ -365,7 +377,7 @@ I read these pages on 2026-10-13. The status column says what each page supports
 | Behaviour the tool relies on | Status | Source |
 |---|---|---|
 | `groupByFieldsForStatistics` and `outStatistics` are query parameters. | Documented | [Query (Feature Service/Layer)](https://developers.arcgis.com/rest/services-reference/enterprise/query-feature-service-layer/) |
-| `exceededTransferLimit: false` means there are no more pages. | Documented for paged queries. The page does not say a group-by query returns the flag, so the tool treats `true` as a cut and nothing more. | The same page |
+| `exceededTransferLimit: false` means there are no more pages. | Documented for paged queries. The page does not say a group-by query returns the flag, so the tool treats `true` as a cut, and also a response as long as the layer's `maxRecordCount` (see Limits). | The same page |
 | `returnGeometry` takes `true` or `false`. | Documented. The page's list of the "only other parameters" usable with `outStatistics` does not name it. The service I ran accepted it. | The same page |
 | A unique-value renderer has `field1`, `field2`, `field3`, `fieldDelimiter`, `defaultSymbol`, `defaultLabel` and `uniqueValueInfos` with `value`. | Documented | [Renderer objects](https://developers.arcgis.com/rest/services-reference/enterprise/renderer-objects/) |
 | A `defaultSymbol` of `null` assigns no symbol to an unmatched feature. | Documented. The page's known limitation, that a generic symbol may show anyway, is tied to SceneLayers with a mesh geometry type only. | [UniqueValueRenderer](https://developers.arcgis.com/javascript/latest/references/core/renderers/UniqueValueRenderer/) |
@@ -429,6 +441,7 @@ story. The `X;AREA OF MINIMAL FLOOD HAZARD` group may be undrawn on purpose.
   definition expression does to it.
 - A response cut at the server's record limit exits 4 when no class carries the token. The tool does not page through grouped
   results. A layer with more value combinations than the limit needs a higher `maxRecordCount`.
+- The Query page does not say that a group-by response carries `exceededTransferLimit`. The tool therefore also treats a response with as many rows as the layer's `maxRecordCount` as cut and exits 4. A layer whose answer has exactly that many value combinations also exits 4, and a higher `maxRecordCount` clears it. A layer file without `maxRecordCount` gets only the flag check.
 - A layer with no rows exits 4 only when no class carries the token. Otherwise the null-token class fails the run with exit 1.
 - A group-by over a very large layer can be slow or refused by the service. The public layer above
   has about six million rows and answered in a few seconds. Your service may differ.
@@ -450,7 +463,11 @@ story. The `X;AREA OF MINIMAL FLOOD HAZARD` group may be undrawn on purpose.
 - If `HTTP_PROXY` is set, a token sent to a loopback http address goes to the proxy in clear text, because the tool does not bypass the proxy for loopback. The self-test sets `NO_PROXY` for itself.
 - The loopback test reads the host name only, so a name such as `localhost` that a hosts file points elsewhere still receives the token over plain http.
 - The redaction replaces the exact token text only. A server that echoes the token URL-encoded, in another case or cut short is not redacted.
-- A class value or label that starts with `=`, `+`, `-` or `@` is written to the CSV unescaped, and a spreadsheet may read it as a formula.
+- Only a CSV cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return is guarded. The guard does not strip a line feed or a leading space, and the apostrophe stays visible in a viewer that does not treat it as a text marker.
+- A failed `--out` write exits 2 even when findings (exit 1) exist, so read the printed verdict.
+- The text of an unsupported-renderer message comes from the service and is not redacted for the token.
+- If the server sends a reply that is not HTTP at all (a malformed status line), the run exits 70, which reads as a tool fault and not a server fault.
+- The self-test writes one temporary directory and removes it. That is the only write besides `--out`.
 - A server-controlled string, such as a class label, prints to the console unfiltered, so a hostile service can inject terminal escape sequences into the report.
 - A dry run prints "Check only. X was not written" without checking that the folder of X is writable, so the failure appears only on the `--apply` run.
 - The self-test opens dozens of loopback connections. On a machine that has run out of ephemeral ports (Windows error 10048) its wire assertions fail with "could not reach", and a re-run after the sockets drain passes.
