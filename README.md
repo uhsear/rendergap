@@ -9,7 +9,7 @@ text `<Null>` in place of the value, so the class value reads `A,<Null>`.
 The server draws those rows. A web map in a browser did not. Close to two in five of the layer's
 pop-ups were gone, and nobody had changed a symbol. The fix was a renderer on the zone field alone.
 
-The check most people write first does not see this. It lists the values in the data that no class
+The obvious check does not see this. It lists the values in the data that no class
 covers. Here every value has a class, so that list is empty and the layer reads as clean. The only
 way to see the problem is to count the rows that sit in a class whose value carries the token.
 
@@ -63,10 +63,10 @@ PASS  a unique prefix --ap of --apply is REFUSED by the parser and writes nothin
 PASS  the footer reports failures by count and by name, and exits 1  <-- pinned defect
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-253 assertions, 0 failed
+254 assertions, 0 failed
 ```
 
-The full run prints all 253 assertions. Each `...` line above is where this block is cut. Every
+The full run prints all 254 assertions. Each `...` line above is where this block is cut. Every
 other line is copied from the run.
 
 ## What already exists
@@ -100,10 +100,10 @@ shows only that the search found nothing.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package. It reads a layer's REST
 endpoint over HTTP or HTTPS, or two JSON files that you saved.
 
-The self-test prints the same 253 assertions on Windows (Python 3.13.2) and on Ubuntu (Python
+The self-test prints the same 254 assertions on Windows (Python 3.13.2) and on Ubuntu (Python
 3.9.25, 3.11.16 and 3.12.3). The Windows and Ubuntu 3.12.3 outputs are identical line for line after
 the carriage returns are removed. `coverage run --branch rendergap.py --self-test` reports 100
-percent of statements and branches (1133 statements, 268 branches, none partial) on Windows (coverage
+percent of statements and branches (1134 statements, 268 branches, none partial) on Windows (coverage
 7.16.1). No line is excluded from the measurement. Ubuntu has no `coverage` or `pyflakes` module, so
 coverage and the lint were measured on Windows only.
 
@@ -130,7 +130,7 @@ python rendergap.py --layer-json layer.json --stats-json stats.json --out findin
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--url` | none | A layer URL that ends in the layer number, with no query string. The tool reads `?f=json`, then runs one group-by query on `/query`. |
+| `--url` | none | A layer URL that ends in the layer number, with no query string. The tool reads `?f=json`, then runs a group-by query on `/query`, and a row-count query when the response is complete. |
 | `--layer-json` | none | A saved layer response, a `.lyrx` layer file, or a bare renderer. A byte order mark is accepted. |
 | `--stats-json` | none | A saved group-by response. Its count column must be named `rendergap_n`, and it must count the object id field. Needs `--layer-json`. |
 | `--static` | off | Check the renderer alone. Needs `--layer-json`. Use it when you have no data. |
@@ -139,7 +139,7 @@ python rendergap.py --layer-json layer.json --stats-json stats.json --out findin
 | `--sample` | `10` | How many findings to list under each heading. `0` lists none. |
 | `--out` | off | Write the findings to this CSV. The path must not exist. Needs `--apply`. |
 | `--apply` | off | Actually write `--out`. Without it nothing is written. |
-| `--self-test` | off | Run the assertions and exit. Other flags are ignored. |
+| `--self-test` | off | Run the assertions and exit. Other known flags are ignored; an unknown flag still exits 64. |
 
 Name exactly one of `--url` and `--layer-json`. With `--layer-json`, name exactly one of
 `--stats-json` and `--static`. A mistake exits 64 and prints nothing on stdout.
@@ -242,7 +242,7 @@ refused, because the file now exists.
 
 A text cell (`kind`, `severity`, `key`, `detail`) that starts with `=`, `+`, `-`, `@`, a tab or a
 carriage return gets one apostrophe in front, so a spreadsheet reads it as text and not as a
-formula ([OWASP: CSV Injection](https://owasp.org/www-community/attacks/CSV_Injection) lists those
+formula ([OWASP: CSV Injection](https://community.owasp.org/attacks/CSV_Injection) lists those
 triggers and the single-quote prefix). A key built from the data, such as `-5,x`, is stored as
 `'-5,x`. The `rows` column stays a plain number. The tool never reads its own CSV back. A reader
 that wants the original text removes exactly one leading apostrophe from a cell that began with one
@@ -288,7 +288,7 @@ A `--static` run with no finding exits 4 and says "NOT CHECKED", because it look
 
 ## How it asks the data
 
-`--url` sends three GET requests. The first reads the layer JSON. The second is a group-by statistics
+`--url` sends up to three GET requests. A cut, empty or unverified null-token response skips the third, so it sends two. The first reads the layer JSON. The second is a group-by statistics
 query on the renderer's fields. The third is a `returnCountOnly` query that compares the group counts
 with the layer's row count (see Limits). This is the group-by query the tool sends for the layer above:
 
@@ -453,7 +453,7 @@ story. The `X;AREA OF MINIMAL FLOOD HAZARD` group may be undrawn on purpose.
 - The comparison is exact text. Case and surrounding spaces count. A date field or a coded-value
   domain may show the value in a different form in the renderer than in the group-by response, and
   then every row would look unmatched. Check the first run by eye.
-- Whole numbers match in either form, so `5` and `5.0` are one value. Other number formats are not normalised.
+- A whole number in the data matches in either form, so a data value `5` or `5.0` reads as `5`. The tool does not normalise a class value: a class written `5.0` does not match that data and shows as a gap. Other number formats are not normalised.
 - Floating-point class values compare as text, so a data value of `0.30000000000000004` does not match the class `0.3` and shows as a gap.
 - The query uses `where=1=1` and sets no time or geometry filter. I did not test what a layer
   definition expression does to it.
@@ -504,6 +504,14 @@ story. The `X;AREA OF MINIMAL FLOOD HAZARD` group may be undrawn on purpose.
 - OWASP warns that the apostrophe prefix is not reliable in Excel after the CSV is saved and reopened, and it also lists line feed and full-width `=` `+` `-` `@` as triggers, which this tool does not guard.
 - A leading apostrophe in the CSV may be the guard or the original text, so stripping it is lossy for data that began with an apostrophe.
 - The CSV is UTF-8 with no byte order mark. Import it as UTF-8 in Excel, because a double click may show non-ASCII keys as garbled text.
+- The dated observations (the NFHL run on 2026-10-13, the `gh search repos rendergap` result, the 128 classes on 2026-11-11) are not exercised by the self-test and were not re-run. They stay honest only because they carry their dates.
+- The CSV detail guard is defensive. A real detail cell starts with `class '`, the quoted key or fixed text, so only the key column can carry a hostile leading character.
+- A boolean flag given a value, such as `--static=SECRET`, makes argparse quote that value in its usage error, so a secret typed there reaches stderr.
+- A `--url` reply that starts with a UTF-8 byte order mark exits 2 as "is not JSON". A file with one is read.
+- `TIMEOUT_SECONDS` bounds each socket read, not the whole request, so a server that drips bytes can keep a run alive past 60 seconds.
+- A deeply nested JSON document raises `RecursionError`, which exits 70 (tool fault) and not 2.
+- The README cites no source for the Windows Winsock 10048 behaviour or for the urllib `HTTP_PROXY` and `NO_PROXY` behaviour. Both rest on my own runs.
+- The rows of the "Documentation checked" table on renderer objects and `objectIdField` say "Documented" where the page lists the fields without describing them.
 - A failed `--self-test` exits 1, the same code as "findings exist". Do not schedule it beside a findings gate.
 - Nothing here checks a hosted layer's own client-side renderer in a web map. Save that JSON and use
   `--layer-json` with `--stats-json`.

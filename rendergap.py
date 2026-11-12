@@ -666,7 +666,11 @@ def _self_test(tmp):
     # ---- value text, so the data and the classes compare as text
     check(text_of(None) == NULL_TOKEN, "a null reads as the token")
     check(text_of(5.0) == "5" and text_of(5) == "5",
-          "5 and 5.0 are the same class value")
+          "a data value 5 and 5.0 key the same")
+    check(from_rest({"type": "uniqueValue", "field1": "K",
+                     "uniqueValueInfos": [{"value": "5.0"}]}).classes[0][0]
+          == "5.0", "a class value written 5.0 is kept as text, not "
+          "normalised  <-- pinned defect")
     check(text_of(1.5) == "1.5", "a fraction keeps its digits")
     check(text_of(True) == "true" and text_of(False) == "false",
           "a boolean reads as true or false")
