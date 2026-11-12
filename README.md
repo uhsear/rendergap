@@ -37,8 +37,12 @@ PASS  a token with a trailing line break is stripped and sent clean  <-- pinned 
 ...
 PASS  a 460 character token that the server echoes is redacted whole, not cut at 200 first  <-- pinned defect
 PASS  an unexpected crash exits 70 and redacts the token from its message and its traceback  <-- pinned defect
+PASS  a renderer type that echoes the token is redacted from the NOT CHECKED verdict  <-- pinned defect
+PASS  a class label that echoes the token is redacted from the report and the findings file  <-- pinned defect
 PASS  a redirect is refused and the second host never sees the request  <-- pinned defect
 PASS  a JSON error body under HTTP 200 is an error, not a layer  <-- pinned defect
+...
+PASS  a chunked reply cut in the middle exits 2, not 70  <-- pinned defect
 ...
 PASS  a response cut at the limit with nothing else flagged exits 4, never 0  <-- pinned defect
 PASS  a response as long as maxRecordCount with no exceededTransferLimit exits 4, never a clean 0  <-- pinned defect
@@ -63,10 +67,10 @@ PASS  a unique prefix --ap of --apply is REFUSED by the parser and writes nothin
 PASS  the footer reports failures by count and by name, and exits 1  <-- pinned defect
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-254 assertions, 0 failed
+267 assertions, 0 failed
 ```
 
-The full run prints all 254 assertions. Each `...` line above is where this block is cut. Every
+The full run prints all 267 assertions. Each `...` line above is where this block is cut. Every
 other line is copied from the run.
 
 ## What already exists
@@ -100,10 +104,10 @@ shows only that the search found nothing.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package. It reads a layer's REST
 endpoint over HTTP or HTTPS, or two JSON files that you saved.
 
-The self-test prints the same 254 assertions on Windows (Python 3.13.2) and on Ubuntu (Python
-3.9.25, 3.11.16 and 3.12.3). The Windows and Ubuntu 3.12.3 outputs are identical line for line after
+The self-test prints the same 267 assertions on Windows (Python 3.13.2 and 3.9.25) and on Ubuntu
+(Python 3.9.25, 3.11.16 and 3.12.3). The Windows 3.13.2 and Ubuntu 3.12.3 outputs are identical line for line after
 the carriage returns are removed. `coverage run --branch rendergap.py --self-test` reports 100
-percent of statements and branches (1134 statements, 268 branches, none partial) on Windows (coverage
+percent of statements and branches (1198 statements, 282 branches, none partial) on Windows (coverage
 7.16.1). No line is excluded from the measurement. Ubuntu has no `coverage` or `pyflakes` module, so
 coverage and the lint were measured on Windows only.
 
@@ -330,14 +334,18 @@ never prints it.
 The tool sends the token only over `https`, or to a loopback address. It does not follow a redirect,
 because a redirect would send the header to whatever host answers. If a server echoes the token
 back in an error message, the tool replaces it with `***`, before it cuts the message to 200
-characters. The message and traceback of an unexpected crash are redacted the same way.
+characters. The message and traceback of an unexpected crash are redacted the same way. Every line the
+tool prints is redacted, and so is the findings file, because a service can echo the token into a
+renderer type or a class label.
 
 The self-test proves each of these against the stub, and greps the output, the errors and the
 findings file for the token. That includes a 460 character token, which is longer than the cut.
 
 The tool has no flag that takes a token on the command line. If you guess one, such as `--token`, and
 type the secret after it, the usage error counts the unrecognized arguments and does not print them.
-The self-test pins this for a flag-and-value pair and for a stray positional.
+The self-test pins this for a flag-and-value pair and for a stray positional. A value that a known
+flag refuses, such as `--sample abc` or `--static=abc`, is not printed either. The usage error names
+the flag and says the text is not shown.
 
 ## Layer files
 
@@ -453,7 +461,7 @@ story. The `X;AREA OF MINIMAL FLOOD HAZARD` group may be undrawn on purpose.
 - The comparison is exact text. Case and surrounding spaces count. A date field or a coded-value
   domain may show the value in a different form in the renderer than in the group-by response, and
   then every row would look unmatched. Check the first run by eye.
-- A whole number in the data matches in either form, so a data value `5` or `5.0` reads as `5`. The tool does not normalise a class value: a class written `5.0` does not match that data and shows as a gap. Other number formats are not normalised.
+- A whole number in the data matches in either form, so a data value `5` or `5.0` reads as `5`. A class written with a decimal point (`5.0`, `5.50`, up to 15 characters) is compared in the same plain form (`5`, `5.5`), so it meets that data. The comparison does not know the field type, so a text field that holds `5` also meets a class `5.0`. Other number formats are not normalised.
 - Floating-point class values compare as text, so a data value of `0.30000000000000004` does not match the class `0.3` and shows as a gap.
 - The query uses `where=1=1` and sets no time or geometry filter. I did not test what a layer
   definition expression does to it.
@@ -477,41 +485,39 @@ story. The `X;AREA OF MINIMAL FLOOD HAZARD` group may be undrawn on purpose.
 - The "Layer files" section quotes facts from a file made with `arcpy` 3.6 and a run on five rows. The repo holds no such file, so you cannot reproduce them.
 - A `--url` that ends in `?` passes the URL check and sends `??f=json`, which most servers answer with a page that is not JSON (exit 2).
 - A `--url` with a space, a control character, a non-ASCII character (write a host name in punycode), a bad port or an unclosed IPv6 bracket exits 64 before any request. The self-test pins each of these cases.
-- A server that does not speak HTTP, such as a TLS alert on a plain http port, exits 70 with a traceback instead of 2.
+- A server that does not speak HTTP, such as a TLS alert on a plain http port, exits 2 as "could not reach". The self-test pins a reply that is not HTTP at all.
 - If `HTTP_PROXY` is set, a token sent to a loopback http address goes to the proxy in clear text, because the tool does not bypass the proxy for loopback. The self-test sets `NO_PROXY` for itself.
 - The loopback test reads the host name only, so a name such as `localhost` that a hosts file points elsewhere still receives the token over plain http.
 - The redaction replaces the exact token text only. A server that echoes the token URL-encoded, in another case or cut short is not redacted.
 - Only a CSV cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return is guarded. The guard does not strip a line feed or a leading space, and the apostrophe stays visible in a viewer that does not treat it as a text marker.
 - A layer response with no `drawingInfo`, such as a Table, exits 4 with a message that says the renderer type is not `uniqueValue`, which reads as if a renderer exists.
 - A run that exits 4 writes no `--out` file even under `--apply`, because a CSV with no findings would read as a clean run. The tool prints "NOT CHECKED, so X was not written". A job that expects the CSV must check for exit 4 first.
-- An unrecognized argument, such as a guessed `--token` followed by a secret, is counted in the usage error and never echoed. The usage error for a bad value of a known flag (for example `--sample abc`) still quotes that value.
+- An unrecognized argument, such as a guessed `--token` followed by a secret, is counted in the usage error and never echoed. A refused value of a known flag (`--sample abc`, `--static=abc`) is also not echoed: the usage error names the flag and says the text is not shown.
 - `--out` without `--apply` is a dry run and writes nothing, although the flag table says "Needs `--apply`".
 - The tool never reads its own CSV, so a reader strips one leading apostrophe itself. The self-test pins that strip on its own read-back.
-- A reply cut off in the middle of the JSON exits 2 as "is not JSON", so a dropped connection reads as bad JSON.
-- The Python 3.9 results above were measured on Ubuntu. A Windows build of Python 3.9 was not run.
+- A reply cut off in the middle of the JSON exits 2. A reply with a content length that falls short reads as "is not JSON", and a chunked reply that stops mid-chunk reads as "could not reach", so a dropped connection can read as bad JSON.
 - A `.lyrx` unique-value renderer whose classes do not match the expected shape is skipped silently, so a damaged file that draws a default symbol can exit 0. The REST path refuses a renderer with zero classes.
 - The Esri page shows the `X-Esri-Authorization` header form for a token. It does not say that a query parameter is wrong; the tool uses the documented header form.
 - A failed `--out` write exits 2 even when findings (exit 1) exist, so read the printed verdict.
-- The text of an unsupported-renderer message comes from the service and is not redacted for the token.
-- If the server sends a reply that is not HTTP at all (a malformed status line), the run exits 70, which reads as a tool fault and not a server fault.
 - The self-test writes one temporary directory and removes it. That is the only write besides `--out`.
-- A server-controlled string, such as a class label, prints to the console unfiltered, so a hostile service can inject terminal escape sequences into the report.
 - A dry run prints "Check only. X was not written" without checking that the folder of X is writable, so the failure appears only on the `--apply` run.
 - The self-test opens dozens of loopback connections. On a machine that has run out of ephemeral ports (Windows error 10048) its wire assertions fail with "could not reach", and a re-run after the sockets drain passes.
 - Under `--url` the count check is a second query, not one snapshot. A layer that is edited between the two queries exits 4 with a count mismatch, and a re-run clears it. A service that answers `returnCountOnly` with a different `where` meaning than the group-by is not detected.
 - An empty layer that has a null-token class exits 1 and prints "rows not counted" and "the data was not compared". The tool stops at "the layer has no rows" and reports no compared groups.
-- A server-supplied string, such as a renderer type or a class label, prints to stdout without redaction, and a class label also goes to the CSV. A service that echoes the token into one of them leaks it.
+- A server-supplied string, such as a renderer type or a class label, is redacted for the exact token text only (the self-test pins the renderer type, the class label and the CSV). It prints to the console and goes to the CSV otherwise unfiltered, so a hostile service can send a value with a line feed that forges a second "VERDICT" line, or terminal escape sequences.
 - OWASP warns that the apostrophe prefix is not reliable in Excel after the CSV is saved and reopened, and it also lists line feed and full-width `=` `+` `-` `@` as triggers, which this tool does not guard.
 - A leading apostrophe in the CSV may be the guard or the original text, so stripping it is lossy for data that began with an apostrophe.
 - The CSV is UTF-8 with no byte order mark. Import it as UTF-8 in Excel, because a double click may show non-ASCII keys as garbled text.
 - The dated observations (the NFHL run on 2026-10-13, the `gh search repos rendergap` result, the 128 classes on 2026-11-11) are not exercised by the self-test and were not re-run. They stay honest only because they carry their dates.
 - The CSV detail guard is defensive. A real detail cell starts with `class '`, the quoted key or fixed text, so only the key column can carry a hostile leading character.
-- A boolean flag given a value, such as `--static=SECRET`, makes argparse quote that value in its usage error, so a secret typed there reaches stderr.
 - A `--url` reply that starts with a UTF-8 byte order mark exits 2 as "is not JSON". A file with one is read.
 - `TIMEOUT_SECONDS` bounds each socket read, not the whole request, so a server that drips bytes can keep a run alive past 60 seconds.
 - A deeply nested JSON document raises `RecursionError`, which exits 70 (tool fault) and not 2.
 - The README cites no source for the Windows Winsock 10048 behaviour or for the urllib `HTTP_PROXY` and `NO_PROXY` behaviour. Both rest on my own runs.
 - The rows of the "Documentation checked" table on renderer objects and `objectIdField` say "Documented" where the page lists the fields without describing them.
+- A `--url` that ends in `#` passes the URL check. The fragment swallows the query on the wire, so the server gets no `f=json` and most answer with a page that is not JSON (exit 2).
+- A label that holds non-ASCII text prints in the console code page. A log made by redirecting the output may show it garbled (cp1252 on Windows). The run does not crash, and the CSV is UTF-8 and correct.
+- The `layer.json`, `stats.json` and `widgets.lyrx` files in the examples are not in the repo. The `layer.json` and `stats.json` outputs reproduce from the text shown. The `widgets.lyrx` output cannot be reproduced from the repo.
 - A failed `--self-test` exits 1, the same code as "findings exist". Do not schedule it beside a findings gate.
 - Nothing here checks a hosted layer's own client-side renderer in a web map. Save that JSON and use
   `--layer-json` with `--stats-json`.

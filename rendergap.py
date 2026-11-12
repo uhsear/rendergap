@@ -44,6 +44,7 @@ from __future__ import print_function
 import argparse
 import contextlib
 import csv
+import http.client
 import importlib.util
 import io
 import json
@@ -174,6 +175,27 @@ def text_of(value):
 
 def group_key(values, delimiter):
     return delimiter.join(text_of(v) for v in values)
+
+
+def _decimal_text(part):
+    """A part written with a decimal point, such as 5.0 or 5.50, in the form a
+    data value takes (5 or 5.5). Any other part comes back as it is."""
+    digits = part[1:] if part[:1] == "-" else part
+    whole, dot, fraction = digits.partition(".")
+    if not (dot and whole.isdigit() and fraction.isdigit()
+            and digits.isascii()) or len(digits) > 15:
+        return part
+    return text_of(float(part))
+
+
+def match_key(key, delimiter, width):
+    """The form in which a class key and a data key are compared, so that a
+    class written 5.0 meets the data value 5. A key whose part count is not the
+    renderer's field count is left as it is."""
+    parts = key.split(delimiter)
+    if len(parts) != width:
+        return key
+    return delimiter.join(_decimal_text(p) for p in parts)
 
 
 def has_null_token(key, delimiter):
@@ -346,9 +368,14 @@ def analyze(renderer, groups, incomplete=None, static=False):
     if static and groups is None and incomplete is None:
         incomplete = "this was a static check, the data was not queried"
     total = None if groups is None else sum(groups.values())
+    width = len(renderer.fields)
+
+    def matched(key):
+        return match_key(key, renderer.delimiter, width)
+
     labels = {}
     for key, label in renderer.classes:
-        labels.setdefault(key, label)
+        labels.setdefault(matched(key), label)
     for key, label in renderer.classes:
         if not has_null_token(key, renderer.delimiter):
             continue
@@ -368,7 +395,7 @@ def analyze(renderer, groups, incomplete=None, static=False):
     hidden = False
     if groups is not None:
         for key in sorted(groups, key=lambda k: (-groups[k], k)):
-            if key in labels:
+            if matched(key) in labels:
                 continue
             if renderer.has_default:
                 findings.append(Finding(
@@ -504,7 +531,7 @@ def get_json(url, params, token=None):
             body = response.read(MAX_BYTES + 1)
     except urllib.error.HTTPError as exc:
         raise SourceError("HTTP %d from %s" % (exc.code, url))
-    except (urllib.error.URLError, OSError) as exc:
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
         raise SourceError(_redact("could not reach %s: %s" % (url, exc), token))
     if len(body) > MAX_BYTES:
         raise SourceError("the response from %s is over %d bytes" %
@@ -541,19 +568,21 @@ def cell(value):
     return value
 
 
-def write_findings(path, report):
+def write_findings(path, report, token=None):
     """Create path, which must not exist. A failed write removes the partial
     file, so a re-run is not refused for a file the tool left behind. Every
-    text cell is guarded by cell(). The row count stays a number."""
+    text cell is redacted for the token, then guarded by cell(). The row count
+    stays a number."""
     handle = open(path, "x", newline="", encoding="utf-8")
     try:
         with handle:
             writer = csv.writer(handle)
             writer.writerow(OUT_COLUMNS)
             for f in report.findings:
-                writer.writerow([cell(f.kind), cell(f.severity), cell(f.key),
+                writer.writerow([cell(f.kind), cell(f.severity),
+                                 cell(_redact(f.key, token)),
                                  "" if f.rows is None else f.rows,
-                                 cell(f.text)])
+                                 cell(_redact(f.text, token))])
     except (OSError, csv.Error, UnicodeError):
         os.remove(path)
         raise
@@ -671,6 +700,31 @@ def _self_test(tmp):
                      "uniqueValueInfos": [{"value": "5.0"}]}).classes[0][0]
           == "5.0", "a class value written 5.0 is kept as text, not "
           "normalised  <-- pinned defect")
+    check(match_key("5.0", ",", 1) == "5" and match_key("5.50", ",", 1) == "5.5"
+          and match_key("-5.0", ",", 1) == "-5"
+          and match_key("A,5.0", ",", 2) == "A,5"
+          and match_key("5.0,<Null>", ",", 2) == "5,<Null>",
+          "a class written with a decimal point meets the data value  "
+          "<-- pinned defect")
+    check(match_key("5", ",", 1) == "5" and match_key("A.0", ",", 1) == "A.0"
+          and match_key("1.2.3", ",", 1) == "1.2.3"
+          and match_key(".5", ",", 1) == ".5" and match_key("5.", ",", 1) == "5."
+          and match_key("5.0", ",", 2) == "5.0"
+          and match_key("1234567890.12345", ",", 1) == "1234567890.12345"
+          and match_key("5." + chr(0x660), ",", 1) == "5." + chr(0x660),
+          "a part that is not a plain decimal, or a key of the wrong width, "
+          "is left alone")
+    got_report = analyze(Renderer(["RATE"], ",", [("5.0", "five")], False),
+                         {"5": 12, "6": 3})
+    check([(f.kind, f.key) for f in got_report.findings
+           if f.kind == HIDDEN] == [(HIDDEN, "6")],
+          "data 5 meets the class 5.0, and only 6 is a gap  "
+          "<-- pinned defect")
+    got_report = analyze(Renderer(["A", "B"], ",", [("x,5.0", "")], False),
+                         {"x,5": 4})
+    check(not [f for f in got_report.findings if f.kind == HIDDEN],
+          "a two field key with a decimal part meets the data too  "
+          "<-- pinned defect")
     check(text_of(1.5) == "1.5", "a fraction keeps its digits")
     check(text_of(True) == "true" and text_of(False) == "false",
           "a boolean reads as true or false")
@@ -1115,6 +1169,15 @@ def _self_test(tmp):
             if parsed.path in cfg["raw"]:
                 status, headers, body = cfg["raw"][parsed.path]
                 return self._send(status, body, headers)
+            if parsed.path in cfg.get("garbage", ()):
+                self.wfile.write(b"this is not http" + bytes((13, 10, 13, 10)))
+                return
+            if parsed.path in cfg.get("cut", ()):
+                # A chunked reply that stops in the middle of a chunk.
+                self.wfile.write(b"HTTP/1.1 200 OK\r\n"
+                                 b"Transfer-Encoding: chunked\r\n\r\n"
+                                 b"20\r\n{\"a\": 1, \"b\": 2")
+                return
             sent = self.headers.get("X-Esri-Authorization")
             if cfg["token"] and sent != "Bearer " + cfg["token"]:
                 return self._send(200, {"error": {
@@ -1335,6 +1398,33 @@ def _self_test(tmp):
               "probe quoting ***" in err,
               "an unexpected crash exits 70 and redacts the token from its "
               "message and its traceback  <-- pinned defect")
+        # a service that echoes the token into text it supplies is redacted
+        # on every line the tool prints and in the findings file
+        os.environ["RENDERGAP_TEST_TOKEN"] = secret
+        stub.cfg["token"] = secret
+        stub.cfg["layer"] = layer({"type": "simple " + secret})
+        code, out, err = run_cli(["--url", base, "--token-env",
+                                  "RENDERGAP_TEST_TOKEN"])
+        check(code == 4 and secret not in out + err and "simple ***" in out,
+              "a renderer type that echoes the token is redacted from the "
+              "NOT CHECKED verdict  <-- pinned defect")
+        echo_layer = layer(rest(["A,<Null>"]))
+        echo_layer["drawingInfo"]["renderer"]["uniqueValueInfos"][0][
+            "label"] = "lbl " + secret
+        stub.cfg["layer"] = echo_layer
+        stub.cfg["rows"] = [{"OBJECTID": 1, "KIND": "A", "SUBKIND": None}]
+        echo_csv = os.path.join(tmp, "echo.csv")
+        code, out, err = run_cli(["--url", base, "--token-env",
+                                  "RENDERGAP_TEST_TOKEN", "--out", echo_csv,
+                                  "--apply"])
+        with open(echo_csv, encoding="utf-8") as handle:
+            written = handle.read()
+        check(code == 1 and secret not in out + err + written and
+              "lbl ***" in out and "lbl ***" in written,
+              "a class label that echoes the token is redacted from the "
+              "report and the findings file  <-- pinned defect")
+        stub.cfg["layer"] = layer(sfha)
+        stub.cfg["rows"] = rows
         del os.environ["RENDERGAP_TEST_TOKEN"]
         stub.cfg["token"] = None
 
@@ -1390,6 +1480,19 @@ def _self_test(tmp):
         del stub.cfg["raw"]["/svc/MapServer/0"]
         code, out, err = run_cli(["--url", base[:-1] + "9"])
         check(code == 2 and "HTTP 404" in err, "an HTTP 404 exits 2")
+        stub.cfg["cut"] = ["/svc/MapServer/0"]
+        code, out, err = run_cli(["--url", base])
+        check(code == 2 and "could not reach" in err and
+              "Traceback" not in err,
+              "a chunked reply cut in the middle exits 2, not 70  "
+              "<-- pinned defect")
+        del stub.cfg["cut"]
+        stub.cfg["garbage"] = ["/svc/MapServer/0"]
+        code, out, err = run_cli(["--url", base])
+        check(code == 2 and "could not reach" in err and
+              "Traceback" not in err,
+              "a reply that is not HTTP at all exits 2, not 70")
+        del stub.cfg["garbage"]
         dead = "http://127.0.0.1:1/svc/MapServer/0"
         code, out, err = run_cli(["--url", dead])
         check(code == 2 and "could not reach" in err,
@@ -1492,9 +1595,26 @@ def _self_test(tmp):
                   "unrecognized argument(s)" in err,
                   "an unrecognized argument is counted, never echoed  "
                   "<-- pinned defect")
-        code, out, err = run_cli(["--static", "--sample", "abc"])
-        check(code == 64 and "invalid int value" in err,
-              "any other usage error keeps argparse's own message")
+        for argv in (["--static", "--sample", "SECRETTOKEN123"],
+                     ["--static=SECRETTOKEN123"],
+                     ["--apply=SECRETTOKEN123", "--static"]):
+            code, out, err = run_cli(argv)
+            check(code == 64 and "SECRETTOKEN123" not in out + err and
+                  "its text is not shown" in err and
+                  err.count("argument --") == 1,
+                  "a refused value of a known flag is never echoed, and the "
+                  "flag is named  <-- pinned defect")
+        code, out, err = run_cli(["--static", "--sample"])
+        check(code == 64 and "expected one argument" in err,
+              "a usage error that holds no user text keeps argparse's own "
+              "message")
+        quiet_err = io.StringIO()
+        with contextlib.redirect_stderr(quiet_err):
+            raises(SystemExit, lambda: _QuietParser(prog="p").error(
+                "the following arguments are required: x"),
+                "a message that is not about one argument passes through")
+        check("required: x" in quiet_err.getvalue(),
+              "and argparse's own text is kept")
         lyrx_file = tmpfile("l.lyrx", "\ufeff" + json.dumps(
             {"layerDefinitions": [{"renderer": cim([("A", "<Null>")],
                                                     default=False,
@@ -1835,6 +1955,12 @@ class _QuietParser(argparse.ArgumentParser):
             message = ("%d unrecognized argument(s); their text is not shown "
                        "in case one is a secret"
                        % len(message[len(marker):].split()))
+        elif message.startswith("argument "):
+            # argparse quotes the value it refused: --sample abc, --static=abc.
+            flag, _, detail = message.partition(": ")
+            if not detail.startswith("expected "):
+                message = ("%s: the value is not accepted; its text is not "
+                           "shown in case it is a secret" % flag)
         super().error(message)
 
 
@@ -2044,21 +2170,27 @@ def _run(argv, secrets):
     token = os.environ[args.token_env].strip() if args.token_env else None
     secrets.append(token)
     source = args.url or args.layer_json
+
+    def say(text):
+        # A service can echo the token into any text it supplies, a renderer
+        # type or a class label, so every printed line is redacted.
+        print(_redact(text, token))
+
     try:
         report = _collect(args, token)
     except Unsupported as exc:
-        print("rendergap: %s" % source)
-        print("\nVERDICT: NOT CHECKED. %s." % exc)
+        say("rendergap: %s" % source)
+        say("\nVERDICT: NOT CHECKED. %s." % exc)
         if args.out:
-            print("\nNOT CHECKED, so %s was not written." % args.out)
+            say("\nNOT CHECKED, so %s was not written." % args.out)
         return 4
     except (SourceError, IOError, OSError) as exc:
         print("error: %s" % _redact(str(exc), token), file=sys.stderr)
         return 2
 
-    print("rendergap: %s" % source)
+    say("rendergap: %s" % source)
     for line in describe(report, args.sample, args.fail_on_lint):
-        print(line)
+        say(line)
 
     code = gate(report, args.fail_on_lint)
     if args.out:
@@ -2067,7 +2199,7 @@ def _run(argv, secrets):
                   "would read as a clean run." % args.out)
         elif args.apply:
             try:
-                write_findings(args.out, report)
+                write_findings(args.out, report, token)
             except (IOError, OSError, csv.Error, UnicodeError) as exc:
                 print("error: could not write %s: %s" % (args.out, exc),
                       file=sys.stderr)
