@@ -117,8 +117,9 @@ The self-test prints the same 277 assertions on Windows (Python 3.13.2 and 3.9.2
 (Python 3.9.25, 3.11.16 and 3.12.3). The Windows 3.13.2 and Ubuntu 3.12.3 outputs are identical line for line after
 the carriage returns are removed. `coverage run --branch rendergap.py --self-test` reports 100
 percent of statements and branches (1224 statements, 286 branches, none partial) on Windows (coverage
-7.16.1). No line is excluded from the measurement. Ubuntu has no `coverage` or `pyflakes` module, so
-coverage and the lint were measured on Windows only.
+7.16.1). No line is excluded from the measurement. The system Ubuntu Python has no `coverage` or `pyflakes` module. In a venv on the same host,
+Ubuntu 3.12.3 also reports 100 percent branch coverage (1224 statements, 286 branches, none
+partial) and a clean pyflakes run.
 
 The self-test starts a stub server on `127.0.0.1` with `http.server`. Every network path in this
 README runs against that stub: the token header, the redirect, the error body under HTTP 200, a
@@ -254,7 +255,7 @@ the tool still exits 1.
 refused, because the file now exists.
 
 A text cell (`kind`, `severity`, `key`, `detail`) that starts with `=`, `+`, `-`, `@`, a tab or a
-carriage return gets one apostrophe in front, so a spreadsheet reads it as text and not as a
+carriage return gets one apostrophe in front, so that most spreadsheets show it as text and not as a
 formula ([OWASP: CSV Injection](https://community.owasp.org/attacks/CSV_Injection) lists those
 triggers and the single-quote prefix). A key built from the data, such as `-5,x`, is stored as
 `'-5,x`. The `rows` column stays a plain number. The tool never reads its own CSV back. A reader
@@ -520,6 +521,7 @@ story. The `X;AREA OF MINIMAL FLOOD HAZARD` group may be undrawn on purpose.
 - The dated observations (the NFHL run on 2026-10-13, the `gh search repos rendergap` result, the 128 classes on 2026-11-11) are not exercised by the self-test and were not re-run. They stay honest only because they carry their dates.
 - The CSV detail guard is defensive. A real detail cell starts with `class '`, the quoted key or fixed text, so only the key column can carry a hostile leading character.
 - A `--url` reply that starts with a UTF-8 byte order mark exits 2 as "is not JSON". A file with one is read.
+- Ctrl-C is not caught: `main()` catches `Exception`, not `KeyboardInterrupt`, so an interrupted run ends with a Python traceback and the interpreter's interrupt status, not one of the documented exit codes.
 - `TIMEOUT_SECONDS` bounds each socket read, not the whole request, so a server that drips bytes can keep a run alive past 60 seconds.
 - A deeply nested JSON document raises `RecursionError`, which exits 70 (tool fault) and not 2.
 - The README cites no source for the Windows Winsock 10048 behaviour or for the urllib `HTTP_PROXY` and `NO_PROXY` behaviour. Both rest on my own runs.
@@ -532,7 +534,7 @@ story. The `X;AREA OF MINIMAL FLOOD HAZARD` group may be undrawn on purpose.
 - A consumer that closes the pipe before the report is printed, such as `| head -1` on a long report, makes the run exit 70 (tool fault), not a verdict.
 - The redaction covers only the token from `--token-env`. A secret that you put in the `--url` path or in another argument is printed in the source line and in error messages.
 - A REST renderer that carries both `field1` and `valueExpression` is compared on `field1`. The Esri renderer page does not say whether `field1` is ignored then, so a renderer with an Arcade expression exits 4 only when it has no `field1`.
-- A null-token class that holds no feature reads as latent, and the run exits 0 when the layer has a default symbol. That holds when the data has a near match, such as `A,<Null>` for a class `a,<Null>` (the comparison is case sensitive): the default symbol draws those features. Without a default symbol the same data exits 1.
+- A null-token class that holds no feature reads as latent. The run exits 0 only when the layer file names a `maxRecordCount` and has a default symbol; without `maxRecordCount` the same input exits 1 with "rows not counted" (see the record-limit line above). The exit 0 holds when the data has a near match, such as `A,<Null>` for a class `a,<Null>` (the comparison is case sensitive): the default symbol draws those features. Without a default symbol the same data exits 1.
 - A class value or a data value that contains the delimiter can merge two groups. For example `('A,B','')` and `('A','B,')` both read as `A,B,`. It takes commas inside classification values.
 - Nothing here checks a hosted layer's own client-side renderer in a web map. Save that JSON and use
   `--layer-json` with `--stats-json`.
