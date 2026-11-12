@@ -44,6 +44,10 @@ PASS  a response cut at the limit with nothing else flagged exits 4, never 0  <-
 PASS  a response as long as maxRecordCount with no exceededTransferLimit exits 4, never a clean 0  <-- pinned defect
 PASS  a layer with no rows compared nothing, so exit 4  <-- pinned defect
 PASS  --static on a clean renderer exits 4, not a clean 0  <-- pinned defect
+PASS  a NOT CHECKED run writes no --out file even under --apply, and says so  <-- pinned defect
+PASS  an unsupported renderer writes no --out file and says so  <-- pinned defect
+PASS  an unrecognized argument is counted, never echoed  <-- pinned defect
+PASS  an unrecognized argument is counted, never echoed  <-- pinned defect
 PASS  a latent null-token class with no maxRecordCount to check the response against is not reported clean  <-- pinned defect
 PASS  a trailing space exits 64 with a usage message, not 70  <-- pinned defect
 ...
@@ -59,10 +63,10 @@ PASS  a unique prefix --ap of --apply is REFUSED by the parser and writes nothin
 PASS  the footer reports failures by count and by name, and exits 1  <-- pinned defect
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-248 assertions, 0 failed
+253 assertions, 0 failed
 ```
 
-The full run prints all 248 assertions. Each `...` line above is where this block is cut. Every
+The full run prints all 253 assertions. Each `...` line above is where this block is cut. Every
 other line is copied from the run.
 
 ## What already exists
@@ -96,10 +100,10 @@ shows only that the search found nothing.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package. It reads a layer's REST
 endpoint over HTTP or HTTPS, or two JSON files that you saved.
 
-The self-test prints the same 248 assertions on Windows (Python 3.13.2) and on Ubuntu (Python
+The self-test prints the same 253 assertions on Windows (Python 3.13.2) and on Ubuntu (Python
 3.9.25, 3.11.16 and 3.12.3). The Windows and Ubuntu 3.12.3 outputs are identical line for line after
 the carriage returns are removed. `coverage run --branch rendergap.py --self-test` reports 100
-percent of statements and branches (1111 statements, 260 branches, none partial) on Windows (coverage
+percent of statements and branches (1133 statements, 268 branches, none partial) on Windows (coverage
 7.16.1). No line is excluded from the measurement. Ubuntu has no `coverage` or `pyflakes` module, so
 coverage and the lint were measured on Windows only.
 
@@ -284,8 +288,9 @@ A `--static` run with no finding exits 4 and says "NOT CHECKED", because it look
 
 ## How it asks the data
 
-`--url` sends two GET requests. The first reads the layer JSON. The second is a group-by statistics
-query on the renderer's fields. This is the query the tool sends for the layer above:
+`--url` sends three GET requests. The first reads the layer JSON. The second is a group-by statistics
+query on the renderer's fields. The third is a `returnCountOnly` query that compares the group counts
+with the layer's row count (see Limits). This is the group-by query the tool sends for the layer above:
 
 ```
 <layer url>/query
@@ -329,6 +334,10 @@ characters. The message and traceback of an unexpected crash are redacted the sa
 
 The self-test proves each of these against the stub, and greps the output, the errors and the
 findings file for the token. That includes a 460 character token, which is longer than the cut.
+
+The tool has no flag that takes a token on the command line. If you guess one, such as `--token`, and
+type the secret after it, the usage error counts the unrecognized arguments and does not print them.
+The self-test pins this for a flag-and-value pair and for a stray positional.
 
 ## Layer files
 
@@ -391,7 +400,7 @@ I read these pages on 2026-10-13. The status column says what each page supports
 | A `defaultSymbol` of `null` assigns no symbol to an unmatched feature. | Documented. The page's known limitation, that a generic symbol may show anyway, is tied to SceneLayers with a mesh geometry type only. | [UniqueValueRenderer](https://developers.arcgis.com/javascript/latest/references/core/renderers/UniqueValueRenderer/) |
 | The default delimiter is a comma when two fields are set. | Documented (JavaScript SDK) | The same page |
 | A layer has `objectIdField` and fields of type `esriFieldTypeOID`. | Documented | [Feature layer](https://developers.arcgis.com/rest/services-reference/enterprise/layer-feature-service/) |
-| Send a token in `X-Esri-Authorization` with the `Bearer` scheme, not in a query parameter. | Documented | [Accessing ArcGIS token-secured web services](https://enterprise.arcgis.com/en/server/11.1/administer/linux/accessing-arcgis-token-secured-web-services.htm) |
+| Send a token in `X-Esri-Authorization` with the `Bearer` scheme (the documented header form). | Documented | [Accessing ArcGIS token-secured web services](https://enterprise.arcgis.com/en/server/11.1/administer/linux/accessing-arcgis-token-secured-web-services.htm) |
 | `useDefaultSymbol` controls whether unmatched values are displayed. | Documented in one line | [arcpy.mp UniqueValueRenderer](https://doc.esri.com/en/arcgis-pro/latest/arcpy/mapping/uniquevaluerenderer-class.html), [CIMUniqueValueRenderer.UseDefaultSymbol](https://doc.esri.com/en/arcgis-pro/3.7/sdk/api-reference/topic6161.html) |
 | `COUNT` skips nulls. | Documented for the Summary Statistics tool only. The Query page does not state it. | [Summary Statistics](https://desktop.arcgis.com/en/arcmap/10.5/tools/analysis-toolbox/summary-statistics.htm) |
 | A browser client does not match a class value that contains `<Null>`. | Not documented. The renderer reference and the JavaScript reference do not mention the token. | Observed in one deployment |
@@ -474,7 +483,14 @@ story. The `X;AREA OF MINIMAL FLOOD HAZARD` group may be undrawn on purpose.
 - The redaction replaces the exact token text only. A server that echoes the token URL-encoded, in another case or cut short is not redacted.
 - Only a CSV cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return is guarded. The guard does not strip a line feed or a leading space, and the apostrophe stays visible in a viewer that does not treat it as a text marker.
 - A layer response with no `drawingInfo`, such as a Table, exits 4 with a message that says the renderer type is not `uniqueValue`, which reads as if a renderer exists.
-- A run that exits 4 writes no `--out` file even under `--apply`, and does not say so. A job that expects the CSV must check for exit 4 first.
+- A run that exits 4 writes no `--out` file even under `--apply`, because a CSV with no findings would read as a clean run. The tool prints "NOT CHECKED, so X was not written". A job that expects the CSV must check for exit 4 first.
+- An unrecognized argument, such as a guessed `--token` followed by a secret, is counted in the usage error and never echoed. The usage error for a bad value of a known flag (for example `--sample abc`) still quotes that value.
+- `--out` without `--apply` is a dry run and writes nothing, although the flag table says "Needs `--apply`".
+- The tool never reads its own CSV, so a reader strips one leading apostrophe itself. The self-test pins that strip on its own read-back.
+- A reply cut off in the middle of the JSON exits 2 as "is not JSON", so a dropped connection reads as bad JSON.
+- The Python 3.9 results above were measured on Ubuntu. A Windows build of Python 3.9 was not run.
+- A `.lyrx` unique-value renderer whose classes do not match the expected shape is skipped silently, so a damaged file that draws a default symbol can exit 0. The REST path refuses a renderer with zero classes.
+- The Esri page shows the `X-Esri-Authorization` header form for a token. It does not say that a query parameter is wrong; the tool uses the documented header form.
 - A failed `--out` write exits 2 even when findings (exit 1) exist, so read the printed verdict.
 - The text of an unsupported-renderer message comes from the service and is not redacted for the token.
 - If the server sends a reply that is not HTTP at all (a malformed status line), the run exits 70, which reads as a tool fault and not a server fault.

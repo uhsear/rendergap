@@ -1466,6 +1466,31 @@ def _self_test(tmp):
         check(code == 4 and "NOT CHECKED" in out and "VERDICT: no" not in out,
               "--static on a clean renderer exits 4, not a clean 0  "
               "<-- pinned defect")
+        not_checked_csv = os.path.join(tmp, "nc.csv")
+        code, out, err = run_cli(["--layer-json", clean_layer, "--static",
+                                  "--out", not_checked_csv, "--apply"])
+        check(code == 4 and not os.path.exists(not_checked_csv) and
+              "NOT CHECKED, so" in out and "was not written" in out,
+              "a NOT CHECKED run writes no --out file even under --apply, "
+              "and says so  <-- pinned defect")
+        simple_layer = tmpfile("simple.json", json.dumps(
+            {"drawingInfo": {"renderer": {"type": "simple"}}}))
+        code, out, err = run_cli(["--layer-json", simple_layer, "--static", "--out",
+                                  not_checked_csv, "--apply"])
+        check(code == 4 and not os.path.exists(not_checked_csv) and
+              "was not written" in out,
+              "an unsupported renderer writes no --out file and says so  "
+              "<-- pinned defect")
+        for argv in (["--token", "SeCr3tValue123", "--static"],
+                     ["--static", "SeCr3tValue123"]):
+            code, out, err = run_cli(argv)
+            check(code == 64 and "SeCr3tValue123" not in out + err and
+                  "unrecognized argument(s)" in err,
+                  "an unrecognized argument is counted, never echoed  "
+                  "<-- pinned defect")
+        code, out, err = run_cli(["--static", "--sample", "abc"])
+        check(code == 64 and "invalid int value" in err,
+              "any other usage error keeps argparse's own message")
         lyrx_file = tmpfile("l.lyrx", "\ufeff" + json.dumps(
             {"layerDefinitions": [{"renderer": cim([("A", "<Null>")],
                                                     default=False,
@@ -1796,8 +1821,21 @@ def _self_test(tmp):
 
 # ----------------------------------------------------------------------- cli
 
+class _QuietParser(argparse.ArgumentParser):
+    """A usage error never echoes an unrecognized argument, because a user
+    who guesses --token and types the secret after it would print it."""
+
+    def error(self, message):
+        marker = "unrecognized arguments: "
+        if message.startswith(marker):
+            message = ("%d unrecognized argument(s); their text is not shown "
+                       "in case one is a secret"
+                       % len(message[len(marker):].split()))
+        super().error(message)
+
+
 def _parse(argv):
-    ap = argparse.ArgumentParser(
+    ap = _QuietParser(
         prog="rendergap.py",
         description="Flag unique-value classes that carry the <Null> token "
                     "and values that no class or default symbol covers.",
@@ -2007,6 +2045,8 @@ def _run(argv, secrets):
     except Unsupported as exc:
         print("rendergap: %s" % source)
         print("\nVERDICT: NOT CHECKED. %s." % exc)
+        if args.out:
+            print("\nNOT CHECKED, so %s was not written." % args.out)
         return 4
     except (SourceError, IOError, OSError) as exc:
         print("error: %s" % _redact(str(exc), token), file=sys.stderr)
@@ -2016,8 +2056,12 @@ def _run(argv, secrets):
     for line in describe(report, args.sample, args.fail_on_lint):
         print(line)
 
+    code = gate(report, args.fail_on_lint)
     if args.out:
-        if args.apply:
+        if code == 4:
+            print("\nNOT CHECKED, so %s was not written. A header-only file "
+                  "would read as a clean run." % args.out)
+        elif args.apply:
             try:
                 write_findings(args.out, report)
             except (IOError, OSError, csv.Error, UnicodeError) as exc:
@@ -2029,7 +2073,7 @@ def _run(argv, secrets):
             print("\nCheck only. %s was not written. Re-run with --apply."
                   % args.out)
 
-    return gate(report, args.fail_on_lint)
+    return code
 
 
 if __name__ == "__main__":
