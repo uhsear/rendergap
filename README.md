@@ -53,6 +53,8 @@ PASS  an unsupported renderer writes no --out file and says so  <-- pinned defec
 PASS  an unrecognized argument is counted, never echoed  <-- pinned defect
 PASS  an unrecognized argument is counted, never echoed  <-- pinned defect
 PASS  a latent null-token class with no maxRecordCount to check the response against is not reported clean  <-- pinned defect
+PASS  a class 5.0,<Null> that holds rows fails with its row count, not as an unverified latent class  <-- pinned defect
+PASS  a token typed into the --out path is redacted from the path line, exit 1  <-- pinned defect
 PASS  a trailing space exits 64 with a usage message, not 70  <-- pinned defect
 ...
 PASS  a hand-built statistics file with a zero count is refused, not read as an empty null class  <-- pinned defect
@@ -67,10 +69,10 @@ PASS  a unique prefix --ap of --apply is REFUSED by the parser and writes nothin
 PASS  the footer reports failures by count and by name, and exits 1  <-- pinned defect
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-267 assertions, 0 failed
+277 assertions, 0 failed
 ```
 
-The full run prints all 267 assertions. Each `...` line above is where this block is cut. Every
+The full run prints all 277 assertions. Each `...` line above is where this block is cut. Every
 other line is copied from the run.
 
 ## What already exists
@@ -104,10 +106,10 @@ shows only that the search found nothing.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package. It reads a layer's REST
 endpoint over HTTP or HTTPS, or two JSON files that you saved.
 
-The self-test prints the same 267 assertions on Windows (Python 3.13.2 and 3.9.25) and on Ubuntu
+The self-test prints the same 277 assertions on Windows (Python 3.13.2 and 3.9.25) and on Ubuntu
 (Python 3.9.25, 3.11.16 and 3.12.3). The Windows 3.13.2 and Ubuntu 3.12.3 outputs are identical line for line after
 the carriage returns are removed. `coverage run --branch rendergap.py --self-test` reports 100
-percent of statements and branches (1198 statements, 282 branches, none partial) on Windows (coverage
+percent of statements and branches (1224 statements, 286 branches, none partial) on Windows (coverage
 7.16.1). No line is excluded from the measurement. Ubuntu has no `coverage` or `pyflakes` module, so
 coverage and the lint were measured on Windows only.
 
@@ -335,7 +337,7 @@ The tool sends the token only over `https`, or to a loopback address. It does no
 because a redirect would send the header to whatever host answers. If a server echoes the token
 back in an error message, the tool replaces it with `***`, before it cuts the message to 200
 characters. The message and traceback of an unexpected crash are redacted the same way. Every line the
-tool prints is redacted, and so is the findings file, because a service can echo the token into a
+tool prints is redacted, the path of `--out` included, and so is the findings file, because a service can echo the token into a
 renderer type or a class label.
 
 The self-test proves each of these against the stub, and greps the output, the errors and the
@@ -396,7 +398,7 @@ reproduced it. A lint does not change the exit code. `--fail-on-lint` makes it d
 
 ## Documentation checked
 
-I read these pages on 2026-10-13. The status column says what each page supports.
+I read these pages on 2026-10-13 and 2026-11-11, as each row says. The status column says what each page supports.
 
 | Behaviour the tool relies on | Status | Source |
 |---|---|---|
@@ -404,7 +406,7 @@ I read these pages on 2026-10-13. The status column says what each page supports
 | `exceededTransferLimit: false` means there are no more pages. | Documented for paged queries. The page does not say a group-by query returns the flag, so the tool treats `true` as a cut, and also a response as long as the layer's `maxRecordCount` (see Limits). | The same page |
 | `returnCountOnly` returns `{"count": n}`, the number of features the query would return. | Documented, read on 2026-11-11. The page's example response is `{ "count": 48 }`. The tool sends it with `where=1=1`. | The same page |
 | `returnGeometry` takes `true` or `false`. | Documented. The page's list of the "only other parameters" usable with `outStatistics` does not name it. The service I ran accepted it. | The same page |
-| A unique-value renderer has `field1`, `field2`, `field3`, `fieldDelimiter`, `defaultSymbol`, `defaultLabel` and `uniqueValueInfos` with `value`. | Documented | [Renderer objects](https://developers.arcgis.com/rest/services-reference/enterprise/renderer-objects/) |
+| A unique-value renderer has `field1`, `field2`, `field3`, `fieldDelimiter`, `defaultSymbol`, `defaultLabel` and `uniqueValueInfos` with `value`. | Shown in the syntax block and an example only. The page gives no property descriptions for these fields (read on 2026-11-12). | [Renderer objects](https://developers.arcgis.com/rest/services-reference/enterprise/renderer-objects/) |
 | A `defaultSymbol` of `null` assigns no symbol to an unmatched feature. | Documented. The page's known limitation, that a generic symbol may show anyway, is tied to SceneLayers with a mesh geometry type only. | [UniqueValueRenderer](https://developers.arcgis.com/javascript/latest/references/core/renderers/UniqueValueRenderer/) |
 | The default delimiter is a comma when two fields are set. | Documented (JavaScript SDK) | The same page |
 | A layer has `objectIdField` and fields of type `esriFieldTypeOID`. | Documented | [Feature layer](https://developers.arcgis.com/rest/services-reference/enterprise/layer-feature-service/) |
@@ -461,7 +463,7 @@ story. The `X;AREA OF MINIMAL FLOOD HAZARD` group may be undrawn on purpose.
 - The comparison is exact text. Case and surrounding spaces count. A date field or a coded-value
   domain may show the value in a different form in the renderer than in the group-by response, and
   then every row would look unmatched. Check the first run by eye.
-- A whole number in the data matches in either form, so a data value `5` or `5.0` reads as `5`. A class written with a decimal point (`5.0`, `5.50`, up to 15 characters) is compared in the same plain form (`5`, `5.5`), so it meets that data. The comparison does not know the field type, so a text field that holds `5` also meets a class `5.0`. Other number formats are not normalised.
+- A class written with a decimal point (`5.0`, `5.50`, up to 15 characters) is compared in the same plain form (`5`, `5.5`), so it meets a data value `5` or `5.5`. A numeric value `5.0` in the data already reads as `5`. Only the class is normalised, so a text value `5.0` in the data does not meet a class `5` and shows as a gap. The comparison does not know the field type, so a text field that holds `5` still meets a class `5.0`, and a text class `5.0` meets a data value `5`. Other number formats are not normalised.
 - Floating-point class values compare as text, so a data value of `0.30000000000000004` does not match the class `0.3` and shows as a gap.
 - The query uses `where=1=1` and sets no time or geometry filter. I did not test what a layer
   definition expression does to it.
@@ -519,6 +521,12 @@ story. The `X;AREA OF MINIMAL FLOOD HAZARD` group may be undrawn on purpose.
 - A label that holds non-ASCII text prints in the console code page. A log made by redirecting the output may show it garbled (cp1252 on Windows). The run does not crash, and the CSV is UTF-8 and correct.
 - The `layer.json`, `stats.json` and `widgets.lyrx` files in the examples are not in the repo. The `layer.json` and `stats.json` outputs reproduce from the text shown. The `widgets.lyrx` output cannot be reproduced from the repo.
 - A failed `--self-test` exits 1, the same code as "findings exist". Do not schedule it beside a findings gate.
+- An empty `--token-env ""`, for example from an unset shell variable in `--token-env "$NAME"`, counts as no `--token-env` flag. The run then queries the service with no token, while a named variable that is unset or empty exits 64.
+- A consumer that closes the pipe before the report is printed, such as `| head -1` on a long report, makes the run exit 70 (tool fault), not a verdict.
+- The redaction covers only the token from `--token-env`. A secret that you put in the `--url` path or in another argument is printed in the source line and in error messages.
+- A REST renderer that carries both `field1` and `valueExpression` is compared on `field1`. The Esri renderer page does not say whether `field1` is ignored then, so a renderer with an Arcade expression exits 4 only when it has no `field1`.
+- A null-token class that holds no feature reads as latent, and the run exits 0 when the layer has a default symbol. That holds when the data has a near match, such as `A,<Null>` for a class `a,<Null>` (the comparison is case sensitive): the default symbol draws those features. Without a default symbol the same data exits 1.
+- A class value or a data value that contains the delimiter can merge two groups. For example `('A,B','')` and `('A','B,')` both read as `A,B,`. It takes commas inside classification values.
 - Nothing here checks a hosted layer's own client-side renderer in a web map. Save that JSON and use
   `--layer-json` with `--stats-json`.
 

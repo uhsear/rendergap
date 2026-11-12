@@ -198,6 +198,13 @@ def match_key(key, delimiter, width):
     return delimiter.join(_decimal_text(p) for p in parts)
 
 
+def class_forms(key, delimiter, width):
+    """The data keys a class key can meet: as written, and with a decimal part
+    (5.0) in the plain form a number takes in the data (5). Only the class is
+    normalised, so a text value 5.0 in the data does not meet a class 5."""
+    return {key, match_key(key, delimiter, width)}
+
+
 def has_null_token(key, delimiter):
     """True when the token is a whole part of the key, not a piece of a word."""
     token = NULL_TOKEN
@@ -358,6 +365,12 @@ def parse_stats(doc, renderer):
     return groups, doc.get("exceededTransferLimit") is True
 
 
+def class_rows(renderer, groups, key):
+    """The rows in the groups that a class key meets."""
+    forms = class_forms(key, renderer.delimiter, len(renderer.fields))
+    return sum(rows for group, rows in groups.items() if group in forms)
+
+
 def _quote(key):
     return "'%s'" % key
 
@@ -370,16 +383,14 @@ def analyze(renderer, groups, incomplete=None, static=False):
     total = None if groups is None else sum(groups.values())
     width = len(renderer.fields)
 
-    def matched(key):
-        return match_key(key, renderer.delimiter, width)
-
     labels = {}
     for key, label in renderer.classes:
-        labels.setdefault(matched(key), label)
+        for form in class_forms(key, renderer.delimiter, width):
+            labels.setdefault(form, label)
     for key, label in renderer.classes:
         if not has_null_token(key, renderer.delimiter):
             continue
-        rows = None if groups is None else groups.get(key, 0)
+        rows = None if groups is None else class_rows(renderer, groups, key)
         if rows is None:
             where = "rows not counted, the data was not compared"
         elif rows == 0:
@@ -395,7 +406,7 @@ def analyze(renderer, groups, incomplete=None, static=False):
     hidden = False
     if groups is not None:
         for key in sorted(groups, key=lambda k: (-groups[k], k)):
-            if matched(key) in labels:
+            if key in labels:
                 continue
             if renderer.has_default:
                 findings.append(Finding(
@@ -725,6 +736,27 @@ def _self_test(tmp):
     check(not [f for f in got_report.findings if f.kind == HIDDEN],
           "a two field key with a decimal part meets the data too  "
           "<-- pinned defect")
+    got_report = analyze(Renderer(["A", "B"], ",", [("5.0,<Null>", "")], True),
+                         {"5,<Null>": 3, "6,x": 2})
+    nulls = [f for f in got_report.findings if f.kind == NULL_CLASS]
+    check([(f.severity, f.rows) for f in nulls] == [(FAIL, 3)]
+          and gate(got_report) == 1,
+          "a null-token class written 5.0,<Null> counts the 3 rows in the "
+          "data group 5,<Null> and fails the run  <-- pinned defect")
+    check(class_rows(Renderer(["A", "B"], ",", [], True), {"5,<Null>": 3,
+          "5.0,<Null>": 2, "6,<Null>": 9}, "5.0,<Null>") == 5,
+          "the rows of a class are the groups that meet it in either form  "
+          "<-- pinned defect")
+    got_report = analyze(Renderer(["CODE"], ",", [("5", "")], False),
+                         {"5.0": 3, "5": 2})
+    check([(f.kind, f.key, f.rows) for f in got_report.findings
+           if f.kind == HIDDEN] == [(HIDDEN, "5.0", 3)],
+          "a text value 5.0 in the data does not meet the class 5 and is a "
+          "gap  <-- pinned defect")
+    got_report = analyze(Renderer(["CODE"], ",", [("5.0", "")], False),
+                         {"5.0": 3})
+    check(not [f for f in got_report.findings if f.kind == HIDDEN],
+          "a text value 5.0 in the data still meets the class 5.0")
     check(text_of(1.5) == "1.5", "a fraction keeps its digits")
     check(text_of(True) == "true" and text_of(False) == "false",
           "a boolean reads as true or false")
@@ -1423,6 +1455,26 @@ def _self_test(tmp):
               "lbl ***" in out and "lbl ***" in written,
               "a class label that echoes the token is redacted from the "
               "report and the findings file  <-- pinned defect")
+        # the token typed into the --out path is redacted on every path line
+        tok_csv = os.path.join(tmp, secret + ".csv")
+        tok_missing = os.path.join(tmp, secret, "f.csv")
+        base_args = ["--url", base, "--token-env", "RENDERGAP_TEST_TOKEN"]
+        runs = [(1, base_args + ["--out", tok_csv]),
+                (1, base_args + ["--out", tok_csv, "--apply"]),
+                (64, base_args + ["--out", tok_csv, "--apply"]),
+                (2, base_args + ["--out", tok_missing, "--apply"])]
+        for want, argv in runs:
+            code, out, err = run_cli(argv)
+            check(code == want and secret not in out + err and
+                  "***" in out + err,
+                  "a token typed into the --out path is redacted from the "
+                  "path line, exit %d  <-- pinned defect" % want)
+        stub.cfg["layer"] = layer({"type": "simple"})
+        code, out, err = run_cli(base_args + ["--out", tok_missing,
+                                              "--apply"])
+        check(code == 4 and secret not in out + err and "***" in out,
+              "a token typed into the --out path is redacted from the NOT "
+              "CHECKED path line  <-- pinned defect")
         stub.cfg["layer"] = layer(sfha)
         stub.cfg["rows"] = rows
         del os.environ["RENDERGAP_TEST_TOKEN"]
@@ -1684,6 +1736,19 @@ def _self_test(tmp):
     check(code == 0 and "VERDICT: clean." in out,
           "with no null-token class there is nothing latent to doubt, so a "
           "layer file with no maxRecordCount is still compared")
+
+    no_limit["drawingInfo"]["renderer"] = rest(["5.0,<Null>"])
+    five_null = tmpfile("five-null.json", json.dumps(no_limit))
+    code, out, err = run_cli(["--layer-json", five_null, "--stats-json",
+                              tmpfile("five-null-stats.json", json.dumps(stats([
+                                  {"KIND": 5, "SUBKIND": None,
+                                   COUNT_FIELD: 3},
+                                  {"KIND": 6, "SUBKIND": "x",
+                                   COUNT_FIELD: 2}])))])
+    check(code == 1 and "3 of 5 features (60.0%)" in out
+          and "cannot be ruled out" not in out,
+          "a class 5.0,<Null> that holds rows fails with its row count, not "
+          "as an unverified latent class  <-- pinned defect")
 
     # ---- bad files and bad usage
     code, out, err = run_cli(["--layer-json", os.path.join(tmp, "nope.json"),
@@ -2061,7 +2126,8 @@ def _unverified_latent(renderer, layer, groups):
     gives no record limit to check the response against. A cut that the
     server did not flag would look the same."""
     return not _has_record_limit(layer) and any(
-        has_null_token(key, renderer.delimiter) and not groups.get(key)
+        has_null_token(key, renderer.delimiter)
+        and not class_rows(renderer, groups, key)
         for key, label in renderer.classes)
 
 
@@ -2163,11 +2229,13 @@ def _run(argv, secrets):
         return self_test()
 
     problem = _usage_problem(args)
+    token = os.environ.get(args.token_env, "").strip() if args.token_env \
+        else None
     if problem:
-        print("error: %s" % problem, file=sys.stderr)
+        # --out is user text and can hold the token, so redact it here too.
+        print("error: %s" % _redact(problem, token), file=sys.stderr)
         return 64
 
-    token = os.environ[args.token_env].strip() if args.token_env else None
     secrets.append(token)
     source = args.url or args.layer_json
 
@@ -2195,19 +2263,20 @@ def _run(argv, secrets):
     code = gate(report, args.fail_on_lint)
     if args.out:
         if code == 4:
-            print("\nNOT CHECKED, so %s was not written. A header-only file "
-                  "would read as a clean run." % args.out)
+            say("\nNOT CHECKED, so %s was not written. A header-only file "
+                "would read as a clean run." % args.out)
         elif args.apply:
             try:
                 write_findings(args.out, report, token)
             except (IOError, OSError, csv.Error, UnicodeError) as exc:
-                print("error: could not write %s: %s" % (args.out, exc),
-                      file=sys.stderr)
+                print("error: %s" % _redact(
+                    "could not write %s: %s" % (args.out, exc), token),
+                    file=sys.stderr)
                 return 2
-            print("\nwrote %s" % args.out)
+            say("\nwrote %s" % args.out)
         else:
-            print("\nCheck only. %s was not written. Re-run with --apply."
-                  % args.out)
+            say("\nCheck only. %s was not written. Re-run with --apply."
+                % args.out)
 
     return code
 
