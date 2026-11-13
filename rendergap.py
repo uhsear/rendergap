@@ -218,6 +218,16 @@ def _items(value):
         else []
 
 
+def _strict_items(value, name):
+    """The entries of a CIM list. An entry that is not an object is refused,
+    because skipping it could drop a null-token class and read as clean."""
+    if not isinstance(value, list) or not all(isinstance(i, dict)
+                                              for i in value):
+        raise Unsupported("the layer file has %s that are not a list of "
+                          "objects, so its classes cannot be read" % name)
+    return value
+
+
 def from_rest(r):
     """A renderer from the REST drawingInfo form."""
     if r.get("type") != "uniqueValue":
@@ -228,6 +238,10 @@ def from_rest(r):
     if not fields:
         raise Unsupported("the renderer names no field, so its classes come "
                           "from an expression this tool cannot query")
+    expression = r.get("valueExpression")
+    if isinstance(expression, str) and expression.strip():
+        raise Unsupported("the renderer classifies on an Arcade expression, "
+                          "which this tool cannot query")
     infos = r.get("uniqueValueInfos")
     if not isinstance(infos, list) or not infos:
         # An empty list beside a full uniqueValueGroups looks like a renderer
@@ -267,13 +281,19 @@ def from_cim(r):
         lints.append((LINT_EXPRESSION,
                       "valueExpressionInfo is present with an empty expression"))
     classes = []
-    for group in _items(r.get("groups")):
-        for cls in _items(group.get("classes")):
-            for value in _items(cls.get("values")):
+    for group in _strict_items(r.get("groups"), "groups"):
+        for cls in _strict_items(group.get("classes"), "classes"):
+            for value in _strict_items(cls.get("values"), "values"):
                 parts = value.get("fieldValues")
-                if isinstance(parts, list):
-                    classes.append((group_key(parts, DEFAULT_DELIMITER),
-                                    str(cls.get("label") or "")))
+                if not isinstance(parts, list):
+                    raise Unsupported("a class value in the layer file has no "
+                                      "fieldValues list, so its classes "
+                                      "cannot be read")
+                classes.append((group_key(parts, DEFAULT_DELIMITER),
+                                str(cls.get("label") or "")))
+    if not classes:
+        # Zero classes would read as clean when a default symbol exists.
+        raise Unsupported("the layer file holds no readable classes")
     reference = r.get("defaultSymbol")
     drawn = isinstance(reference, dict) and bool(reference.get("symbol"))
     if not drawn:
@@ -881,6 +901,14 @@ def _self_test(tmp):
            "an empty uniqueValueInfos beside full uniqueValueGroups is "
            "unsupported, not a renderer with no classes  <-- pinned defect")
     bad = rest(["a"])
+    bad["valueExpression"] = "$feature.ZONE"
+    raises(Unsupported, lambda: from_rest(bad),
+           "a renderer with an Arcade valueExpression is unsupported even "
+           "when it names fields  <-- pinned defect")
+    bad["valueExpression"] = "  "
+    check(from_rest(bad).fields == ["KIND", "SUBKIND"],
+          "a blank valueExpression is ignored")
+    bad = rest(["a"])
     bad["uniqueValueInfos"].append({"label": "no value"})
     raises(Unsupported, lambda: from_rest(bad),
            "a class with no value is unsupported")
@@ -919,8 +947,22 @@ def _self_test(tmp):
            "a layer file with no fields is unsupported")
     odd = cim([("A", "x")])
     odd["groups"] = [{"classes": [{"values": [{"fieldValues": "bad"}]}]}, 7]
-    check(from_cim(odd).classes == [],
-          "malformed groups, classes and values are skipped, not a crash")
+    raises(Unsupported, lambda: from_cim(odd),
+           "a layer file whose class values cannot be read is unsupported, "
+           "not clean  <-- pinned defect")
+    for label, shape in (
+            ("a non-object group", [7]),
+            ("groups that are not a list", "bad"),
+            ("a group with no classes list", [{}]),
+            ("a non-object class", [{"classes": [7]}]),
+            ("a class with no values list", [{"classes": [{}]}]),
+            ("a non-object value", [{"classes": [{"values": [7]}]}]),
+            ("fieldValues that is text, not a list",
+             [{"classes": [{"values": [{"fieldValues": "A,<Null>"}]}]}]),
+            ("no classes at all", [{"classes": [{"values": []}]}])):
+        odd["groups"] = shape
+        raises(Unsupported, lambda: from_cim(odd),
+               "a layer file with %s is unsupported  <-- pinned defect" % label)
     wide = cim([("A", "x")], default=False)
     wide["groups"][0]["classes"][0]["values"].append(
         {"fieldValues": ["A", "y"]})

@@ -26,6 +26,8 @@ PASS  a null-token class holding rows fails the run  <-- pinned defect
 PASS  a plain unmatched-values diff finds nothing wrong where every value has a class, and the run still exits 1  <-- pinned defect
 ...
 PASS  the verdict names the latent null-token classes and does not say the layer carries none  <-- pinned defect
+PASS  a renderer with an Arcade valueExpression is unsupported even when it names fields  <-- pinned defect
+PASS  a layer file whose class values cannot be read is unsupported, not clean  <-- pinned defect
 ...
 PASS  the query counts the object id field, grouped by the renderer fields  <-- pinned defect
 ...
@@ -76,10 +78,10 @@ PASS  a unique prefix --ap of --apply is REFUSED by the parser and writes nothin
 PASS  the footer reports failures by count and by name, and exits 1  <-- pinned defect
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-277 assertions, 0 failed
+287 assertions, 0 failed
 ```
 
-The full run prints all 277 assertions. Each `...` line above is where this block is cut. Every
+The full run prints all 287 assertions. Each `...` line above is where this block is cut. Every
 other line is copied from the run.
 
 ## What already exists
@@ -113,17 +115,18 @@ shows only that the search found nothing.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package. It reads a layer's REST
 endpoint over HTTP or HTTPS, or two JSON files that you saved.
 
-The self-test prints the same 277 assertions on Windows (Python 3.13.2 and 3.9.25) and on Ubuntu
+The self-test prints the same 287 assertions on Windows (Python 3.13.2 and 3.9.25) and on Ubuntu
 (Python 3.9.25, 3.11.16 and 3.12.3). The Windows 3.13.2 and Ubuntu 3.12.3 outputs are identical line for line after
 the carriage returns are removed. `coverage run --branch rendergap.py --self-test` reports 100
-percent of statements and branches (1224 statements, 286 branches, none partial) on Windows (coverage
+percent of statements and branches (1242 statements, 294 branches, none partial) on Windows (coverage
 7.16.1). No line is excluded from the measurement. The system Ubuntu Python has no `coverage` or `pyflakes` module. In a venv on the same host,
-Ubuntu 3.12.3 also reports 100 percent branch coverage (1224 statements, 286 branches, none
+Ubuntu 3.12.3 also reports 100 percent branch coverage (1242 statements, 294 branches, none
 partial) and a clean pyflakes run.
 
 The self-test starts a stub server on `127.0.0.1` with `http.server`. Every network path in this
-README runs against that stub: the token header, the redirect, the error body under HTTP 200, a
-response cut at the limit, and a refused connection. It never contacts another host.
+README, except the dated public-service run, runs against that stub: the token header, the redirect,
+the error body under HTTP 200, a response cut at the limit, and a refused connection. The self-test never contacts another host. The
+"Run against a public service" section is a live run that you start yourself, and the self-test does not exercise it.
 
 ```
 git clone https://github.com/uhsear/rendergap.git
@@ -144,7 +147,7 @@ python rendergap.py --layer-json layer.json --stats-json stats.json --out findin
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--url` | none | A layer URL that ends in the layer number, with no query string. The tool reads `?f=json`, then runs a group-by query on `/query`, and a row-count query when the response is complete. |
+| `--url` | none | A layer URL that ends in the layer number, with no query string. The tool reads `?f=json`, then runs a group-by query on `/query`, and a row-count query only when the response is complete: not cut, not empty, not unverified, and shorter than the layer's `maxRecordCount`. |
 | `--layer-json` | none | A saved layer response, a `.lyrx` layer file, or a bare renderer. A byte order mark is accepted. |
 | `--stats-json` | none | A saved group-by response. Its count column must be named `rendergap_n`, and it must count the object id field. Needs `--layer-json`. |
 | `--static` | off | Check the renderer alone. Needs `--layer-json`. Use it when you have no data. |
@@ -450,7 +453,7 @@ value combinations with no class and no default symbol: (16)
 VERDICT: 24 finding(s). The features in these groups may draw no symbol or lose their pop-up in a client.
 ```
 
-The layer holds about 5.8 million features in 69 value combinations. The 9 classes that carry the
+On 2026-10-13 the layer held about 5.8 million features in 69 value combinations (a re-run on 2026-11-12 counted 68). The 9 classes that carry the
 token hold about a fifth of them between them, and one of the 9 holds none. The largest
 group with no class, `X;AREA OF MINIMAL FLOOD HAZARD`, holds about one feature in seven. The exit
 code was 1.
@@ -465,7 +468,7 @@ story. The `X;AREA OF MINIMAL FLOOD HAZARD` group may be undrawn on purpose.
 
 ## Limits
 
-- It reads a unique-value renderer only. A simple, class-breaks or Arcade-expression renderer exits 4.
+- It reads a unique-value renderer only. A simple or class-breaks renderer exits 4. A renderer with a non-empty Arcade `valueExpression` (REST) or `valueExpressionInfo` (`.lyrx`) exits 4, even when it also names fields.
 - A renderer with no `uniqueValueInfos` entries exits 4, and that includes one that stores its classes only in `uniqueValueGroups`. The tool reads `uniqueValueInfos`.
 - A layer file with more than one renderer exits 4. Save one layer at a time.
 - The comparison is exact text. Case and surrounding spaces count. A date field or a coded-value
@@ -488,9 +491,13 @@ story. The `X;AREA OF MINIMAL FLOOD HAZARD` group may be undrawn on purpose.
 - A single-field renderer with a `<Null>` class is flagged the same way, but the browser behaviour was observed only for two fields.
 - Two classes with the same value give two `NULL_TOKEN` findings, which inflates the finding count.
 - A layer that leaves some values undrawn on purpose, such as the `X;AREA OF MINIMAL FLOOD HAZARD` group above, exits 1. The tool cannot tell a deliberate gap from a mistake.
+- A text-field class `5.0` is treated as meeting data value `5`, because the comparison ignores the JSON type that the statistics response carries. A layer whose text codes hold both `5` and `5.0` can exit 0 when one of them has no class.
+- A null-token class on a layer with zero features exits 1 and prints "The features in these groups may draw no symbol", which is wrong for a layer with no features. The exit 1 is the conservative direction.
+- Console output shows a carriage return or tab in a data key unchanged, so a key of CR then `x,q` prints as `x,q`. Only the CSV is guarded.
+- A service value that holds a lone surrogate, such as JSON `\ud800`, cannot be encoded as UTF-8, so `--apply` exits 2 with "could not write" and leaves no partial file.
+- A token of one or two characters is redacted wherever its text occurs, so the console output of such a run is hard to read. No token leaks.
 - `--static` finds null-token classes and a missing default symbol, but not the values that are actually unmatched.
 - A `--static` run never exits 0. A run that finds no defect exits 4, so a job cannot read it as a compared clean run.
-- Malformed groups, classes or values in a layer file are skipped without a message. A dropped null-token class can then give exit 0 when a default symbol exists. It takes a damaged file.
 - A layer file saved by Windows PowerShell 5 redirection is UTF-16, and the tool reports it as "is not JSON" (exit 2), which hides the real cause.
 - The "Layer files" section quotes facts from a file made with `arcpy` 3.6 and a run on five rows. The repo holds no such file, so you cannot reproduce them.
 - A `--url` that ends in `?` passes the URL check and sends `??f=json`, which most servers answer with a page that is not JSON (exit 2).
@@ -499,14 +506,14 @@ story. The `X;AREA OF MINIMAL FLOOD HAZARD` group may be undrawn on purpose.
 - If `HTTP_PROXY` is set, a token sent to a loopback http address goes to the proxy in clear text, because the tool does not bypass the proxy for loopback. The self-test sets `NO_PROXY` for itself.
 - The loopback test reads the host name only, so a name such as `localhost` that a hosts file points elsewhere still receives the token over plain http.
 - The redaction replaces the exact token text only. A server that echoes the token URL-encoded, in another case or cut short is not redacted.
-- Only a CSV cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return is guarded. The guard does not strip a line feed or a leading space, and the apostrophe stays visible in a viewer that does not treat it as a text marker.
+- Only a CSV cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return is guarded. The guard does not guard a line feed, and it does not look past a leading space, so a cell such as ` =x` is not guarded and I did not verify how Excel treats it. The guard adds an apostrophe and never strips one, and the apostrophe stays visible in a viewer that does not treat it as a text marker.
 - A layer response with no `drawingInfo`, such as a Table, exits 4 with a message that says the renderer type is not `uniqueValue`, which reads as if a renderer exists.
 - A run that exits 4 writes no `--out` file even under `--apply`, because a CSV with no findings would read as a clean run. The tool prints "NOT CHECKED, so X was not written". A job that expects the CSV must check for exit 4 first.
 - An unrecognized argument, such as a guessed `--token` followed by a secret, is counted in the usage error and never echoed. A refused value of a known flag (`--sample abc`, `--static=abc`) is also not echoed: the usage error names the flag and says the text is not shown.
 - `--out` without `--apply` is a dry run and writes nothing, although the flag table says "Needs `--apply`".
 - The tool never reads its own CSV, so a reader strips one leading apostrophe itself. The self-test pins that strip on its own read-back.
 - A reply cut off in the middle of the JSON exits 2. A reply with a content length that falls short reads as "is not JSON", and a chunked reply that stops mid-chunk reads as "could not reach", so a dropped connection can read as bad JSON.
-- A `.lyrx` unique-value renderer whose classes do not match the expected shape is skipped silently, so a damaged file that draws a default symbol can exit 0. The REST path refuses a renderer with zero classes.
+- A `.lyrx` unique-value renderer whose groups, classes or values are not lists of objects, whose `fieldValues` is not a list, or that holds no class, exits 4 with a message. The REST path refuses a renderer with zero classes the same way. A shape that Pro writes in another form is refused, not guessed.
 - The Esri page shows the `X-Esri-Authorization` header form for a token. It does not say that a query parameter is wrong; the tool uses the documented header form.
 - A failed `--out` write exits 2 even when findings (exit 1) exist, so read the printed verdict.
 - The self-test writes one temporary directory and removes it. That is the only write besides `--out`.
@@ -515,16 +522,16 @@ story. The `X;AREA OF MINIMAL FLOOD HAZARD` group may be undrawn on purpose.
 - Under `--url` the count check is a second query, not one snapshot. A layer that is edited between the two queries exits 4 with a count mismatch, and a re-run clears it. A service that answers `returnCountOnly` with a different `where` meaning than the group-by is not detected.
 - An empty layer that has a null-token class exits 1 and prints "rows not counted" and "the data was not compared". The tool stops at "the layer has no rows" and reports no compared groups.
 - A server-supplied string, such as a renderer type or a class label, is redacted for the exact token text only (the self-test pins the renderer type, the class label and the CSV). It prints to the console and goes to the CSV otherwise unfiltered, so a hostile service can send a value with a line feed that forges a second "VERDICT" line, or terminal escape sequences.
-- OWASP warns that the apostrophe prefix is not reliable in Excel after the CSV is saved and reopened, and it also lists line feed and full-width `=` `+` `-` `@` as triggers, which this tool does not guard.
+- OWASP says its listed sanitisation techniques, taken as a group, are not reliable, and I did not test the apostrophe prefix in Excel after a save and reopen. OWASP also lists line feed and full-width `=` `+` `-` `@` as triggers, which this tool does not guard.
 - A leading apostrophe in the CSV may be the guard or the original text, so stripping it is lossy for data that began with an apostrophe.
 - The CSV is UTF-8 with no byte order mark. Import it as UTF-8 in Excel, because a double click may show non-ASCII keys as garbled text.
 - The dated observations (the NFHL run on 2026-10-13, the `gh search repos rendergap` result, the 128 classes on 2026-11-11) are not exercised by the self-test and were not re-run. They stay honest only because they carry their dates.
-- The CSV detail guard is defensive. A real detail cell starts with `class '`, the quoted key or fixed text, so only the key column can carry a hostile leading character.
+- The `kind` and `severity` CSV cells are fixed constants, so their guard is defensive only. The CSV detail guard is defensive too. A real detail cell starts with `class '`, the quoted key or fixed text, so only the key column can carry a hostile leading character.
 - A `--url` reply that starts with a UTF-8 byte order mark exits 2 as "is not JSON". A file with one is read.
 - Ctrl-C is not caught: `main()` catches `Exception`, not `KeyboardInterrupt`, so an interrupted run ends with a Python traceback and the interpreter's interrupt status, not one of the documented exit codes.
 - `TIMEOUT_SECONDS` bounds each socket read, not the whole request, so a server that drips bytes can keep a run alive past 60 seconds.
 - A deeply nested JSON document raises `RecursionError`, which exits 70 (tool fault) and not 2.
-- The README cites no source for the Windows Winsock 10048 behaviour or for the urllib `HTTP_PROXY` and `NO_PROXY` behaviour. Both rest on my own runs.
+- Microsoft's Winsock error page describes 10048 (`WSAEADDRINUSE`) as "Address already in use" and says a client's `connect` chooses an unused port automatically (https://learn.microsoft.com/en-us/windows/win32/winsock/windows-sockets-error-codes-2). It does not say that running out of ephemeral ports gives 10048, so that cause rests on my own runs. The Python `urllib.request` page says `ProxyHandler` reads `<protocol>_proxy` variables and that `no_proxy` lists the hosts to reach without a proxy (https://docs.python.org/3.12/library/urllib.request.html). It does not mention loopback or an upper-case `NO_PROXY`, so the loopback claim rests on my own runs.
 - The rows of the "Documentation checked" table on renderer objects and `objectIdField` say "Documented" where the page lists the fields without describing them.
 - A `--url` that ends in `#` passes the URL check. The fragment swallows the query on the wire, so the server gets no `f=json` and most answer with a page that is not JSON (exit 2).
 - A label that holds non-ASCII text prints in the console code page. A log made by redirecting the output may show it garbled (cp1252 on Windows). The run does not crash, and the CSV is UTF-8 and correct.
@@ -533,7 +540,7 @@ story. The `X;AREA OF MINIMAL FLOOD HAZARD` group may be undrawn on purpose.
 - An empty `--token-env ""`, for example from an unset shell variable in `--token-env "$NAME"`, counts as no `--token-env` flag. The run then queries the service with no token, while a named variable that is unset or empty exits 64.
 - A consumer that closes the pipe before the report is printed, such as `| head -1` on a long report, makes the run exit 70 (tool fault), not a verdict.
 - The redaction covers only the token from `--token-env`. A secret that you put in the `--url` path or in another argument is printed in the source line and in error messages.
-- A REST renderer that carries both `field1` and `valueExpression` is compared on `field1`. The Esri renderer page does not say whether `field1` is ignored then, so a renderer with an Arcade expression exits 4 only when it has no `field1`.
+- A REST renderer with a blank `valueExpression` (empty or spaces only) is compared on its fields. A non-empty `valueExpression` exits 4, because the Esri JavaScript `UniqueValueRenderer` page calls it an alternative to `field`, and the tool cannot query an expression.
 - A null-token class that holds no feature reads as latent. The run exits 0 only when the layer file names a `maxRecordCount` and has a default symbol; without `maxRecordCount` the same input exits 1 with "rows not counted" (see the record-limit line above). The exit 0 holds when the data has a near match, such as `A,<Null>` for a class `a,<Null>` (the comparison is case sensitive): the default symbol draws those features. Without a default symbol the same data exits 1.
 - A class value or a data value that contains the delimiter can merge two groups. For example `('A,B','')` and `('A','B,')` both read as `A,B,`. It takes commas inside classification values.
 - Nothing here checks a hosted layer's own client-side renderer in a web map. Save that JSON and use
